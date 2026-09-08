@@ -1,0 +1,20 @@
+# Field semantics: analysis/src/locus/analysis/model/cards.py.
+conversation = "openai-compatible"
+# The bundled mlx server reads `model`, `context_tokens`, and `base_url` at boot; an edit to them
+# while a server is resident takes effect only at its next boot.
+model = "mlx-community/Qwen3.6-35B-A3B-6bit"
+base_url = "http://127.0.0.1:8847/v1"
+family = "qwen3"
+# Per-image token ceilings, one per kind of screenshot: 600 is the analog of a Gemini card's medium
+# tier for the activity-screenshots, 1200 the analog of its high tier for pulls.
+max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }
+thinking_budget = 16384
+max_tokens = 24576
+context_tokens = 262144
+headroom = 0.8
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+presence_penalty = 1.5
+presence_context_size = 32768

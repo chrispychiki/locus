@@ -1,0 +1,20 @@
+{
+	"name": "locus-recorder",
+	"type": "module",
+	"private": true,
+	"license": "Apache-2.0",
+	"scripts": {
+		"build": "bun build src/global.js --outfile dist/locus-recorder.min.js --minify --format=iife",
+		"build:lib": "bun build src/index.js --outfile dist/locus-recorder.lib.js --format=esm",
+		"lint": "biome lint ."
+	},
+	"dependencies": {
+		"@fingerprintjs/botd": "2.0.0",
+		"@rrweb/record": "2.1.1",
+		"fflate": "^0.8.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.9",
+		"fake-indexeddb": "^6.2.5"
+	}
+}

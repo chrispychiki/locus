@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+/data/
+.DS_Store
+.env*
+.claude/settings.local.json
+node_modules/
+recorder/dist/
+store/public/*
+!store/public/_headers
+.wrangler/

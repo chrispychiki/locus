@@ -1,0 +1,67 @@
+{
+	"description": "The AE dataset's row layout — the one declaration. The worker imports it to order every row it writes; `locus ae` reads this same file to serve the layout back to readers. Keys are the AE SQL columns themselves, 1-based: blobs[\"8\"] = origin means SELECT blob8. blobs 5-7 are each metric's own, declared per metric under metrics.*; unused slots are written empty. Field semantics, validation, and the clock law live in store/src/telemetry.js. blob_domains states each closed value set as the worker writes it.",
+	"index1": "snippet",
+	"blobs": {
+		"1": "metric",
+		"2": "visitor",
+		"3": "slice",
+		"4": "version",
+		"5-7": "the metric's own blobs (metrics.*.blobs), unused slots empty",
+		"8": "origin",
+		"9": "user_agent",
+		"10": "as_organization"
+	},
+	"blob_domains": {
+		"first_slice": "\"1\" | \"0\"",
+		"spa_route": "\"1\" | \"0\"",
+		"sniff": "bodySniff's non-gzip names (store/src/keys.js)"
+	},
+	"unmeasured_sentinel": -1,
+	"metrics": {
+		"transport_probe": { "blobs": {}, "doubles": { "1": "ts" } },
+		"slice_started": {
+			"blobs": { "5": "url", "6": "first_slice", "7": "visitor_source" },
+			"doubles": { "1": "slice_open_ms" }
+		},
+		"page_load": {
+			"blobs": { "5": "url", "6": "referrer", "7": "spa_route" },
+			"doubles": { "1": "ts" }
+		},
+		"cost_sample": {
+			"blobs": {},
+			"doubles": {
+				"1": "main_thread_ms",
+				"2": "upload_bytes",
+				"3": "heap_bytes_max",
+				"4": "heap_bytes_limit",
+				"5": "backlog_bytes_max",
+				"6": "delivered_bytes",
+				"7": "ts",
+				"8": "visible_ms"
+			}
+		},
+		"chunk_oversize": {
+			"blobs": {},
+			"doubles": { "1": "gzipped_bytes", "2": "count", "3": "ts" }
+		},
+		"snapshot_fatal": {
+			"blobs": {},
+			"doubles": { "1": "gzipped_bytes", "2": "count", "3": "ts" }
+		},
+		"recorder_fault": {
+			"blobs": { "5": "reason", "6": "error", "7": "url" },
+			"doubles": { "1": "ts" }
+		},
+		"capture_gated": {
+			"blobs": { "5": "reason", "6": "url", "7": "detail" },
+			"doubles": { "1": "ts" }
+		},
+		"upload_rejected": { "blobs": { "5": "reason" }, "doubles": {} },
+		"upload_transcoded": { "blobs": { "5": "sniff" }, "doubles": {} },
+		"telemetry_rejected": { "blobs": { "5": "reason" }, "doubles": {} },
+		"worker_error": {
+			"blobs": { "5": "error", "6": "pathname" },
+			"doubles": {}
+		}
+	}
+}

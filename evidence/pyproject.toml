@@ -1,0 +1,52 @@
+[project]
+name = "locus-evidence"
+version = "0.0.0"
+description = "Locus evidence — the store's recorded rrweb into a queryable, replayable local db."
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.26",
+    "playwright>=1.60.0",
+    "ua-parser>=1.0.2",
+]
+
+[project.scripts]
+# Not a CLI verb: a credential helper whose key emission is called only by an
+# ~/.aws profile's config line (and whose --write-profile is install.sh's).
+# The module docstring carries the profile text.
+locus-r2-credentials = "locus.evidence.credential_process:main"
+
+[dependency-groups]
+dev = [
+    "pillow>=12.2.0",
+    "pytest==8.3.4",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The package shells into the bun distillation scripts and reads the vendored rrweb player, so a
+# wheel without them installs code whose load/distill/replay cannot run. They ride inside the
+# package; assets.py finds them there, or at the evidence root in an editable install. The bun
+# package manifest and its installed modules stay out: the distillation scripts import only each
+# other and bun's own builtins, and only the constants generator (a development tool) needs the
+# npm packages.
+[tool.hatch.build.targets.wheel]
+only-include = ["src/locus", "distill", "vendor"]
+exclude = ["distill/node_modules", "distill/*.test.js", "distill/package.json",
+           "distill/bun.lock", "distill/bunfig.toml",
+           "distill/extract_rrweb_constants.js"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/locus" = "locus"
+"distill" = "locus/evidence/distill"
+"vendor" = "locus/evidence/vendor"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests are tmp_path-isolated (own dbs, ephemeral ports, per-home sockets), so they parallelize
+# across all cores; worksteal keeps the browser-heavy long tail from serializing at the end.
+addopts = ["-n", "auto", "--dist", "worksteal"]

@@ -1,0 +1,15 @@
+# Every Python module in the repo lints and formats on ruff's shipped defaults.
+# Run `uv run ruff check` / `uv run ruff format` inside a module.
+# The generated constants file must stay byte-identical to what the generator
+# emits — a guard test compares them.
+exclude = ["evidence/src/locus/evidence/rrweb_constants.py"]
+# The cache lands in the deployment's accreted data directory, resolved
+# relative to this file, so a run from inside a module caches there too.
+cache-dir = "data/cache/ruff"
+
+[lint]
+# Time is UTC end to end: a naive datetime is a defect everywhere in this repo.
+extend-select = ["DTZ"]
+# Two house idioms the defaults would otherwise flag: one-shot helpers assigned
+# as lambdas, and `l` as the line variable in event-stream comprehensions.
+ignore = ["E731", "E741"]

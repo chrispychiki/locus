@@ -1,0 +1,8 @@
+# Serving env per slug — the facts that are this package's own.
+# Which repo a slug serves, the context it holds (MAX_KV_SIZE), and the endpoint it binds (host/port from base_url) are the analysis card's (`model`, `context_tokens`, and `base_url` in config/cards/<slug>.toml under the deployment root): the server derives all three at boot, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
+# An entry here is what makes a card bootable by the bundled server.
+["qwen3.6-35b-a3b-6bit".env]
+MLX_VLM_ENABLE_THINKING = "1"
+MLX_VLM_TOKEN_QUEUE_TIMEOUT = "3600"
+MLX_VLM_VISION_CACHE_SIZE = "128"
+APC_ENABLED = "0"
