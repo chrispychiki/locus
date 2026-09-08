@@ -1,0 +1,78 @@
+[project]
+name = "locus-analysis"
+version = "0.0.0"
+description = "Locus analysis — stored rrweb sessions to grounded findings."
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "locus-evidence",
+    "google-genai>=2.8.0",
+    "huggingface-hub>=0.36.0",
+    "openai>=2.41.0",
+    "pillow>=12.2.0",
+    "playwright>=1.60.0",
+    "pydantic>=2.13.4",
+    "tokenizers>=0.22.0",
+]
+
+# The bundled local server's runtime, Apple-silicon only. Without the extra the paid path still
+# runs; the entry points refuse loudly and name this extra (mlx/__init__.py).
+[project.optional-dependencies]
+mlx = [
+    # The floors name a broken pairing, not a preference. mlx 0.32 made GPU streams thread-scoped,
+    # crashing the qwen3_5 vision path in server mode on every earlier mlx-vlm
+    # (https://github.com/Blaizzy/mlx-vlm/issues/1614); mlx-vlm 0.6.15 is the first release fixed
+    # and tested against mlx 0.32.1, so the two floors move together. There is no ceiling because
+    # the lockfile already pins what installs: a newer mlx-vlm arrives only through a deliberate
+    # upgrade, and the upstream-keyed patches in serve.py and neighbors verify the source they
+    # stand in for at boot and refuse to serve on any other version (mlx/patching.py) — the
+    # upgrade is a re-validation event, never a silent behavior swap.
+    "mlx>=0.32.1; sys_platform == 'darwin'",
+    "mlx-vlm>=0.6.15; sys_platform == 'darwin'",
+    "uvicorn; sys_platform == 'darwin'",
+    "requests; sys_platform == 'darwin'",
+    # mlx-vlm's server renders chat templates through transformers' jinja2 renderer but does not
+    # declare jinja2 (it rode in transitively until mlx-vlm 0.6.15 dropped its mlx-lm dependency);
+    # without it every chat completion 500s at template render.
+    "jinja2; sys_platform == 'darwin'",
+    # HEIC/HEIF decode for the images the server is handed (PIL alone cannot open them);
+    # registered process-wide at boot in serve.py.
+    "pillow-heif; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+locus = "locus.analysis.cli:main"
+locus-mlx-serve = "locus.analysis.mlx.serve:main"
+locus-mlx-chat = "locus.analysis.mlx.chat:main"
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src/locus"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/locus" = "locus"
+
+[tool.uv.sources]
+locus-evidence = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests are tmp_path-isolated (own dbs, ephemeral ports, per-home sockets), so they parallelize
+# across all cores; worksteal keeps the browser-heavy long tail from serializing at the end.
+addopts = ["-n", "auto", "--dist", "worksteal"]
+markers = [
+    "needs_mlx: requires the bundled mlx server running (free local model)",
+]
+filterwarnings = [
+    "ignore:builtin type (Swig|swig).* has no __module__ attribute:DeprecationWarning",
+]

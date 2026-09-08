@@ -1,0 +1,20 @@
+{
+	"name": "locus-store",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"license": "Apache-2.0",
+	"scripts": {
+		"build": "bun install --cwd ../recorder && bun run --cwd ../recorder build && mkdir -p public && cp ../recorder/dist/locus-recorder.min.js public/",
+		"provision": "bun run scripts/provision.js",
+		"deploy": "bun install && bun run build && bun run provision && wrangler deploy",
+		"doctor": "bun run scripts/doctor.js",
+		"lint": "biome lint .",
+		"test": "bun test"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.9",
+		"fflate": "^0.8.3",
+		"wrangler": "^4.125.0"
+	}
+}

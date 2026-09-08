@@ -1,0 +1,13 @@
+# The operator's meanings of session and engaged — the numbers behind every session, engaged, and bounce figure. Record an adjustment here; `locus doctor` then re-derives the sessions table under it.
+#
+# A session starts at a page load when the visitor has none open, and ends when inactivity_minutes pass without user activity (evidence/src/locus/evidence/user_activity.py defines it).
+# A session is engaged when its duration — first user activity to last — exceeds min_seconds, or its pageviews reach min_pageviews; otherwise it is a bounce.
+#
+# Conversion is not defined here. The recording holds every act the visitor made; which acts were a conversion is judged against the site's business frame in data/context/<snippet>.md, never read off a path or a number.
+
+[session]
+inactivity_minutes = 30
+
+[engaged]
+min_seconds = 10
+min_pageviews = 2

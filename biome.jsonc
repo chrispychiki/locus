@@ -1,0 +1,23 @@
+// Every JS module in the repo lints on biome's recommended rules and formats on its defaults.
+// Run `bun run lint` inside a module; `bunx biome format` to format.
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    // The vendored rrweb bundles and the generated constants files are not authored here.
+    "includes": ["**", "!evidence/vendor/**", "!evidence/distill/rrweb_constants.js", "!evidence/distill/html_semantics.js","!recorder/src/rrweb_constants.js"]
+  },
+  "formatter": { "enabled": true },
+  "assist": { "enabled": true },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        // The recorder writes document.cookie directly; the Cookie Store API the rule
+        // prefers is not available across the browsers the recorder must run in.
+        "noDocumentCookie": "off"
+      }
+    }
+  }
+}

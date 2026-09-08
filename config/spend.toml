@@ -1,0 +1,10 @@
+# The operator's spend walls over paid analysis.
+# Every billed model call checks these caps against the ledger (spend.jsonl beside events.db) before it goes to the wire; a reached cap refuses loud until its period turns or this declaration changes. Read fresh at every call — an edit takes effect immediately.
+#
+# Caps are USD over UTC calendar periods; declare any combination of:
+#   day_usd   — the UTC calendar day, 00:00 to 00:00
+#   week_usd  — the ISO week, Monday 00:00 UTC to the next Monday
+#   month_usd — the UTC calendar month, the 1st to the next 1st
+# A missing cap is no cap on that period; a cap of 0 refuses every paid call — the kill switch.
+
+week_usd = 50.0

@@ -1,0 +1,8 @@
+# Desired-state declaration for the deployment's infrastructure: the source of truth `bun run provision` reconciles the live bucket to, and `bun run doctor` asserts against. Change a setting HERE and redeploy — never in the Cloudflare dashboard. Every deploy reconciles the bucket back to these values, so a dashboard edit silently reverts; this declaration is the only knob that sticks.
+#
+# Only settings live here. The bucket's privacy is not one: it holds visitor recordings and is never publicly readable, so provision and doctor assert that outright rather than reading a field that could be declared otherwise. The bucket name, the worker name, and the bindings are owned by wrangler.toml and read from there — never restated, so the two can't drift.
+#
+# TOML because two runtimes read this one number: the store's bun scripts import it, and Locus reads it with tomllib to hold the local db to the same horizon.
+
+# Retention horizon, in days — the one knob behind expiry, and it governs every copy of a recording: the chunks in the bucket, and everything `locus load` ever pulled into the local db. It is simultaneously the storage-cost bound (steady-state storage ≈ daily chunk volume × this) and the privacy/retention policy (how long visitor recordings are kept at all). Set it to whichever of those two binds for you.
+retention_days = 30

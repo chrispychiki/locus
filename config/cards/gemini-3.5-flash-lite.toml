@@ -1,0 +1,23 @@
+# Field semantics: analysis/src/locus/analysis/model/cards.py.
+conversation = "gemini"
+model = "gemini-3.5-flash-lite"
+# Input limit per the model page: https://ai.google.dev/gemini-api/docs/models
+context_tokens = 1048576
+# Lower than the local card's: pulled screenshots ride the detail tier and the whole conversation
+# re-bills every turn.
+headroom = 0.5
+thinking_levels = ["minimal", "low", "medium", "high"]
+thinking_level = "medium"
+# activity_screenshots ride cheap by design: anything the pushed set can't show, the model re-buys
+# at the pulled tier on exactly the moment it needs. Per-image cost is flat within a tier
+# (280/560/1120/2240 for low/medium/high/ultra_high;
+# https://ai.google.dev/gemini-api/docs/media-resolution).
+media_resolution = { activity_screenshots = "medium", pulled_screenshots = "high" }
+# Half the 65536 output max, so a runaway thinking turn hits the ceiling and recovers.
+max_output_tokens = 32768
+
+# From the pricing page (https://ai.google.dev/gemini-api/docs/pricing, read 2026-09-03).
+[pricing]
+input_per_mtok = 0.3
+cached_input_per_mtok = 0.03
+output_per_mtok = 2.5
