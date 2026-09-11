@@ -498,19 +498,18 @@ describe("httpSink.send", () => {
 		expect(isStoreRejection(error)).toBe(false);
 	});
 
-	test("aborts a hung upload after timeoutMs so it cannot wedge the single-flight uploader, and the abort blames nothing on the batch", async () => {
+	test("aborts a hung upload after timeoutMs so it cannot wedge the single-flight uploader, the abort names the deadline and blames nothing on the batch", async () => {
 		const sink = httpSink({
 			url: () => "https://store/x",
 			timeoutMs: 10,
 			fetchFn: (_u, o) =>
 				new Promise((_, reject) => {
-					o.signal.addEventListener("abort", () =>
-						reject(new Error("aborted")),
-					);
+					o.signal.addEventListener("abort", () => reject(o.signal.reason));
 				}),
 		});
 		const error = await sink.send(new Uint8Array([1]), {}).catch((e) => e);
 		expect(error).toBeInstanceOf(Error);
+		expect(error.message).toBe("sink upload exceeded its 10ms deadline");
 		expect(isStoreRejection(error)).toBe(false);
 	});
 

@@ -61,6 +61,21 @@ export {
 // them.
 const MAX_ERROR_RECORDS = 100;
 
+// A BotD verdict resting on one of these detectors alone is not a bot: each fires on a real
+// browser by that browser's own design, while automation trips other detectors beside it.
+//  - detectMimeTypesConsistent reads prototype identity on navigator.mimeTypes. Facebook's Android
+//    in-app browser patches navigator and fails it, on real phones, by app release.
+//  - detectPluginsLengthInconsistency reads navigator.plugins.length === 0 on a Chromium BotD did
+//    not judge Android. Chromium empties the list whenever its PDF viewer is unavailable (the
+//    download-PDFs setting, a PDF extension, Vivaldi), and Android Chrome always reports 0, so
+//    every Android device BotD's own android heuristic misses lands here too. Headless Chrome's new
+//    mode reports the same plugin entries as headed, so alone the check catches only an old-mode
+//    headless that spoofed its user agent and webdriver flag but left plugins untouched.
+const LONE_DETECTOR_EXEMPT = new Set([
+	"detectMimeTypesConsistent",
+	"detectPluginsLengthInconsistency",
+]);
+
 export async function detectBot() {
 	const botd = await loadBotd({ monitoring: false });
 	const { bot } = botd.detect();
@@ -69,9 +84,11 @@ export async function detectBot() {
 	// automation signature from an environment quirk tripping a heuristic — so the firing
 	// detector names ride the verdict, verbatim as BotD keys them.
 	const detections = botd.getDetections();
-	const detail = Object.keys(detections)
-		.filter((name) => detections[name].bot)
-		.join(",");
+	const firing = Object.keys(detections).filter((name) => detections[name].bot);
+	const detail = firing.join(",");
+	if (firing.length === 1 && LONE_DETECTOR_EXEMPT.has(firing[0])) {
+		return { isBot: false, detail };
+	}
 	return { isBot: true, detail };
 }
 
@@ -79,11 +96,12 @@ export async function detectBot() {
  * @param {object} config
  * @param {object} config.sink                    required; see sink.js
  * @param {object} [config.telemetry]             optional fire-and-forget liveness/cost ping sink; see httpTelemetry in sink.js. A replacement channel needs emit; probe is optional — a channel that runs no transport assessment omits it
- * @param {Array<{pattern:string,options:object}>} [config.rrwebRules]  ordered per-URL rrweb options, resolved at each record() and re-resolved on route change; a changed result stops/restarts rrweb (new slice), an unchanged one keeps the in-place PageLoad. Omit for the credential-mask-only default. recordDOM, the event sink, and the credential mask (masking.js) are locked (a rule may add masking, never take credential masking away — a rule's own maskInputFn still runs, beneath the credential check); the snapshot cadence (checkoutEveryNms below) is a default any rule can override
+ * @param {Array<{pattern:string,options:object}>} [config.rrwebRules]  ordered per-URL rrweb options, resolved at each record() and re-resolved on route change; a changed result stops/restarts rrweb (new slice), an unchanged one keeps the in-place PageLoad. Omit for the credential-mask-only default. recordDOM, the event sink, and the credential mask (masking.js) are locked (a rule may add masking, never take credential masking away — a rule's own maskInputFn still runs, beneath the credential check; a rule's maskAllInputs masks every input, `select` included unless its maskInputOptions says `select: false`); the snapshot cadence (checkoutEveryNms below) is a default any rule can override
  * @param {string} [config.visitorId]             override the cookie identity; honored verbatim, never reformatted or rejected, so a deployment supplying its own id owns keeping it inside its store's visitor charset
  * @param {string} [config.visitorSource]         how that supplied id was come by; rides every birth. Absent, births carry "undeclared"
  * @param {boolean} [config.recordLocalEnvironment=false]
  * @param {boolean} [config.botDetection=true]    BotD gate
+ * @param {{isBot:boolean, detail:string}} [config.botVerdict]  a verdict the deployment already took from detectBot() ahead of start(); honored as the gate's own, so BotD runs once, and its exempted detector rides the births
  * @param {number} [config.intervalMs]            base drain cadence (defaults in uploader.js)
  * @param {number} [config.maxIntervalMs]         drain cadence cap as the page context ages (defaults in uploader.js)
  * @param {number} [config.rampPeriodMs]          doubling period for the drain cadence (defaults in uploader.js)
@@ -131,26 +149,22 @@ export async function start(config) {
 	// the recorded corpus is definitionally only what passed, so without this ping "how much of my
 	// traffic is bots" has no witness at all. The local-environment gate above stays silent — the
 	// operator's own dev machine is not their traffic.
-	if (config.botDetection !== false) {
-		const verdict = await detectBot();
-		// One verdict is exempt: detectMimeTypesConsistent firing alone. That check reads
-		// navigator.mimeTypes self-consistency, which Android in-app webviews (Facebook's
-		// foremost) fail on real visitors' devices — an environment quirk, not an automation
-		// signature, and actual automation fires other detectors beside or instead of it
-		// (webdriver flags, headless permission/plugin shapes). Gating on it alone silently
-		// drops a major class of mobile traffic, so the default gate requires more than that
-		// one detector to call a page context a bot.
-		if (verdict.isBot && verdict.detail !== "detectMimeTypesConsistent") {
-			config.telemetry?.emit(
-				gatedPing("bot", {
-					visitorId,
-					recorderVersion,
-					detail: verdict.detail,
-				}),
-			);
-			return null;
-		}
+	const verdict =
+		config.botVerdict ??
+		(config.botDetection !== false ? await detectBot() : null);
+	if (verdict?.isBot) {
+		config.telemetry?.emit(
+			gatedPing("bot", {
+				visitorId,
+				recorderVersion,
+				detail: verdict.detail,
+			}),
+		);
+		return null;
 	}
+	// A verdict the gate exempted leaves no gate row, so the births carry the detector it rested
+	// on — the admitted cohort's only witness on either plane.
+	const gateExempt = verdict?.detail ?? "";
 
 	let firstSlice = true;
 	let pageLoadSliceId = null;
@@ -169,6 +183,7 @@ export async function start(config) {
 			// records normally and lands under an identity nothing later joins to, so nothing but the
 			// birth distinguishes it.
 			visitor_source: identity.source,
+			gate_exempt: gateExempt,
 		});
 		firstSlice = false;
 	};
@@ -484,9 +499,10 @@ export async function start(config) {
 			...resolved,
 			emit: onRrwebEmit,
 			recordDOM: true,
-			// The credential mask (masking.js): both keys are set after the spread so a rule can
-			// neither drop the routing nor hand rrweb a maskInputFn of its own — the rule's masking
-			// intent, its fn included, is honored inside the composed fn instead.
+			// The credential mask (masking.js): its keys are set after the spread so a rule can
+			// neither drop the routing, displace it with maskAllInputs, nor hand rrweb a maskInputFn
+			// of its own — the rule's masking intent, its fn included, is honored inside the composed
+			// fn.
 			...maskingPosture(resolved),
 			// rrweb wraps its observer callbacks only when a handler is given; without one, a throw
 			// inside capture reaches only the page's global error reporting and the recorder never

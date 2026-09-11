@@ -57,25 +57,22 @@ def _zero_shaped(rows: list) -> bool:
 def _ae_layout() -> list[str]:
     """The dataset's row layout, rendered from its one declaration — the same file the worker writes rows by. Served with a zero-shaped result because a position error manufactures exactly that shape."""
     schema = telemetry_schema(deployment_root())
-    positioned = {
-        int(pos): name for pos, name in schema["blobs"].items() if pos.isdigit()
-    }
-    # The uniform head is the contiguous numeric run from position 1; the gap the
-    # schema leaves for each metric's own blobs is where the head ends, and the
-    # numeric keys past it are the uniform tail — derived from the declaration's
-    # own shape, so widening either region never leaves a stale boundary here.
-    positions = sorted(positioned)
-    head_len = 1
-    while (
-        head_len < len(positions) and positions[head_len] == positions[head_len - 1] + 1
-    ):
-        head_len += 1
-    head = [f"blob{pos}={positioned[pos]}" for pos in positions[:head_len]]
-    tail = [f"blob{pos}={positioned[pos]}" for pos in positions[head_len:]]
+    # The uniform blobs are the schema's numeric keys, on every row; each metric's own
+    # blobs follow, declared per metric.
+    uniform = [
+        f"blob{pos}={name}"
+        for pos, name in sorted(
+            (
+                (int(pos), name)
+                for pos, name in schema["blobs"].items()
+                if pos.isdigit()
+            ),
+        )
+    ]
     lines = [
         f"layout ({TELEMETRY_SCHEMA}): "
         f"index1={schema['index1']}; "
-        + " ".join(head)
+        + " ".join(uniform)
         + " on every row, then per metric:"
     ]
     domains = schema.get("blob_domains", {})
@@ -92,12 +89,39 @@ def _ae_layout() -> list[str]:
             + (" ".join(parts) if parts else "(uniform blobs only)")
             + (f" — {decl['note']}" if "note" in decl else "")
         )
-    lines.append(
-        "  every metric: "
-        + " ".join(tail)
-        + f"; unmeasured double = {schema['unmeasured_sentinel']}"
-    )
+    lines.append(f"  unmeasured double = {schema['unmeasured_sentinel']}")
     return lines
+
+
+_POSITION = re.compile(r"^(blob|double)(\d+)$")
+
+
+def _named(rows: list, schema: dict) -> list:
+    """The rows with their blob/double keys renamed from the layout declaration: the uniform positions by the schema's own numeric keys, index1 by its declared name, and a metric's own positions by that metric's declaration once the row carries the metric column. A position the layout does not declare for that row, an aliased column, or a name already taken by another key stays as it came."""
+    uniform = {int(pos): name for pos, name in schema["blobs"].items() if pos.isdigit()}
+    metric_pos = next(
+        (f"blob{pos}" for pos, name in uniform.items() if name == "metric"), None
+    )
+    metrics = schema["metrics"]
+    named = []
+    for row in rows:
+        decl = metrics.get(row.get(metric_pos)) if metric_pos else None
+        out = {}
+        for key, value in row.items():
+            name = None
+            if key == "index1":
+                name = schema["index1"]
+            elif match := _POSITION.match(key):
+                kind, pos = match.group(1), match.group(2)
+                if kind == "blob" and int(pos) in uniform:
+                    name = uniform[int(pos)]
+                elif decl is not None:
+                    name = decl["blobs" if kind == "blob" else "doubles"].get(pos)
+            if name is None or name in row or name in out:
+                name = key
+            out[name] = value
+        named.append(out)
+    return named
 
 
 def _ae_latest(dataset: str) -> str:
@@ -137,6 +161,8 @@ def run_ae(sql: str) -> dict:
     envelope: dict = {"current_timestamp": utc_stamp(), "sql": sql}
     dataset = _ae_dataset()
     rows = result.get("data", [])
+    if rows:
+        rows = _named(rows, telemetry_schema(deployment_root()))
     # A zero-shaped answer is a diagnosis, not a measurement: it looks identical
     # whether the query matched nothing, the plane is lagging or down, or a
     # position was misnamed. The disambiguating facts ride ahead of the rows.
@@ -166,8 +192,8 @@ def run_ae(sql: str) -> dict:
             else "none anywhere in this dataset's retention — rows are the datapoints"
         )
     envelope["schema"] = (
-        f"blob/double positions are named only in {deployment_root() / TELEMETRY_SCHEMA} — "
-        "a position read without it is a guess"
+        f"blob/double positions in the rows are named from {deployment_root() / TELEMETRY_SCHEMA}; "
+        "a key left as blobN/doubleN is one that file declares for no row of that metric"
     )
     headline = (
         f"zero-shaped result ({len(rows)} rows, no nonzero figure) — "

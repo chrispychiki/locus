@@ -283,7 +283,7 @@ class IdbBuffer {
 	/**
 	 * Run one transaction. `body(tx, done)` is synchronous: it issues its requests, chains them through `then`, and calls `done(value)` with what the transaction is worth. Nothing awaits — see the note at the top of this file.
 	 *
-	 * The transaction runs under this buffer's deadline and is registered for teardown: past the deadline it is aborted — releasing the store lock, or its place in line for it — and the operation rejects without waiting for onabort, because a backend hung enough to answer nothing may never deliver the abort event either. Rejections carry a real error even where IndexedDB offers none: an aborted transaction's `error` is legitimately null, and null must never reach an error report.
+	 * The transaction runs under this buffer's deadline and is registered for teardown: past the deadline it is aborted — releasing the store lock, or its place in line for it — and the operation rejects without waiting for onabort, because a backend hung enough to answer nothing may never deliver the abort event either. A failed request is read at onabort: the transaction's error event fires before its `error` slot is set, and the abort that follows is where the error is readable. Rejections carry a real error even where IndexedDB offers none: an aborted transaction's `error` is legitimately null, and null must never reach an error report.
 	 *
 	 * A transaction that completes without the body ever reaching `done` is a failure, not a value: every body reports through the success handler of its last request, so completion with no report means the backend ran the transaction without delivering a request's success event to its handler — a backend answering nothing, the same condition as the deadline, and it is rejected as one. `done(undefined)` is a legitimate report and stays one.
 	 */
@@ -332,15 +332,6 @@ class IdbBuffer {
 									`locus-recorder: IndexedDB ${what} transaction completed without delivering a request result to its handler — the connection is presumed dead`,
 								),
 							),
-				);
-			tx.onerror = () =>
-				settle(() =>
-					reject(
-						tx.error ??
-							new Error(
-								`locus-recorder: IndexedDB ${what} request failed with no error object`,
-							),
-					),
 				);
 			tx.onabort = () =>
 				settle(() =>

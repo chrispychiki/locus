@@ -35,13 +35,13 @@ function put(path, body, method = "PUT") {
 
 const GZIP_BODY = gzipSync(new TextEncoder().encode('{"events":[]}'));
 
-// Every datapoint's blobs are padded to the fixed own-blob width and then carry the three
-// request facts (Origin, User-Agent, AS organization) at uniform tail positions — empty here
+// Every datapoint carries the three request facts (Origin, User-Agent, AS organization) at the
+// uniform positions right after the four-blob head, ahead of the metric's own blobs — empty here
 // because a bare test Request attests none of them.
 const stamped = (blobs, facts = ["", "", ""]) => [
-	...blobs,
-	...Array(7 - blobs.length).fill(""),
+	...blobs.slice(0, 4),
 	...facts,
+	...blobs.slice(4),
 ];
 
 describe("chunkTarget", () => {
@@ -334,11 +334,49 @@ describe("worker", () => {
 					"https://site/p",
 					"1",
 					"written",
+					"",
 				]),
 				doubles: [1749600000000],
 			},
 		]);
 		expect(env.objects.size).toBe(0);
+	});
+
+	test("a birth's exempted detector lands at its declared position, blob11", async () => {
+		const env = fakeEnv();
+		const res = await worker.fetch(
+			new Request(`https://store.test/telemetry/${SNIPPET}/${VISITOR}`, {
+				method: "POST",
+				headers: { "User-Agent": "UA/1" },
+				body: JSON.stringify({
+					metric: "slice_started",
+					sliceId: SLICE,
+					recorderVersion: "locus-recorder/0.5.6",
+					url: "https://site/p",
+					first_slice: true,
+					visitor_source: "written",
+					gate_exempt: "detectPluginsLengthInconsistency",
+				}),
+			}),
+			env,
+		);
+		expect(res.status).toBe(204);
+		expect(env.points[0].blobs).toEqual(
+			stamped(
+				[
+					"slice_started",
+					VISITOR,
+					SLICE,
+					"locus-recorder/0.5.6",
+					"https://site/p",
+					"1",
+					"written",
+					"detectPluginsLengthInconsistency",
+				],
+				["", "UA/1", ""],
+			),
+		);
+		expect(env.points[0].blobs[10]).toBe("detectPluginsLengthInconsistency");
 	});
 
 	test("a transport_probe — the recorder's channel-assessment shot — lands, on a response whose Timing-Allow-Origin lets the sender read the shot's fate", async () => {
@@ -374,7 +412,7 @@ describe("worker", () => {
 	// An upgrade reaches one device at a time, so the worker always outruns some recorder it is
 	// replacing. Refusing that recorder's births would drop them out of every count for the length
 	// of the upgrade.
-	test("a birth from a bundle predating the visitor source lands with it empty", async () => {
+	test("a birth from a bundle predating the visitor source and the exempted detector lands with both empty", async () => {
 		const env = fakeEnv();
 		const res = await worker.fetch(
 			new Request(`https://store.test/telemetry/${SNIPPET}/${VISITOR}`, {
@@ -398,6 +436,7 @@ describe("worker", () => {
 				"locus-recorder/0.2.0",
 				"https://site/p",
 				"1",
+				"",
 				"",
 			]),
 		);
@@ -496,7 +535,7 @@ describe("worker", () => {
 		);
 		// The reason names what bounced: a metric that failed its shape, by name, and a body with
 		// no metric to name as exactly that.
-		expect(env.points.map((p) => p.blobs[4])).toEqual([
+		expect(env.points.map((p) => p.blobs[7])).toEqual([
 			"shape:slice_started",
 			"shape:slice_started",
 			"shape:cost_sample",
@@ -540,7 +579,7 @@ describe("worker", () => {
 		// The identifying blobs survive whole; only the free text is cut.
 		expect(point.blobs[1]).toBe(VISITOR);
 		expect(point.blobs[2]).toBe(SLICE);
-		expect(point.blobs[4].length).toBeLessThan(url.length);
+		expect(point.blobs[7].length).toBeLessThan(url.length);
 		const bytes = point.blobs.reduce(
 			(n, b) => n + new TextEncoder().encode(b).length,
 			0,
@@ -593,7 +632,7 @@ describe("worker", () => {
 			0,
 		);
 		expect(bytes).toBeLessThanOrEqual(AE_BLOB_BYTES);
-		expect(point.blobs[4]).not.toContain("�");
+		expect(point.blobs[7]).not.toContain("�");
 	});
 
 	test("a cost_sample from a heap-less platform carries nulls, encoded as the -1 sentinel, never a fake 0", async () => {
@@ -867,7 +906,7 @@ describe("worker", () => {
 		expect(env.points[1].doubles).toEqual([ts]);
 	});
 
-	test("the request facts ride every datapoint at the uniform tail positions, attested by the transport", async () => {
+	test("the request facts ride every datapoint at the uniform positions after the head, attested by the transport", async () => {
 		const env = fakeEnv();
 		const headers = {
 			"User-Agent": "Mozilla/5.0 (X11; TestKit)",
@@ -907,7 +946,7 @@ describe("worker", () => {
 			"Mozilla/5.0 (X11; TestKit)",
 			"Test Cloud Inc",
 		];
-		expect(env.points.map((p) => p.blobs.slice(7))).toEqual([facts, facts]);
+		expect(env.points.map((p) => p.blobs.slice(4, 7))).toEqual([facts, facts]);
 		expect(env.points.map((p) => p.blobs[0])).toEqual([
 			"page_load",
 			"upload_transcoded",
@@ -972,6 +1011,7 @@ describe("worker", () => {
 					"",
 					"bot",
 					"https://site/p",
+					"",
 				]),
 				doubles: [1752900000123],
 			},
@@ -994,15 +1034,17 @@ describe("worker", () => {
 			env,
 		);
 		expect(res.status).toBe(204);
-		expect(env.points[0].blobs.slice(0, 7)).toEqual([
-			"recorder_fault",
-			VISITOR,
-			"",
-			"",
-			"config_unresolved",
-			"TypeError: failed to fetch",
-			"https://site/landing",
-		]);
+		expect(env.points[0].blobs).toEqual(
+			stamped([
+				"recorder_fault",
+				VISITOR,
+				"",
+				"",
+				"config_unresolved",
+				"TypeError: failed to fetch",
+				"https://site/landing",
+			]),
+		);
 	});
 
 	test("a cost_sample's visibleMs rides after ts — the context's own engaged-time testimony", async () => {
@@ -1049,15 +1091,17 @@ describe("worker", () => {
 			env,
 		);
 		expect(fault.status).toBe(204);
-		expect(env.points[0].blobs.slice(0, 7)).toEqual([
-			"recorder_fault",
-			VISITOR,
-			"",
-			"",
-			"drain_failed",
-			"Error: sink down",
-			"",
-		]);
+		expect(env.points[0].blobs).toEqual(
+			stamped([
+				"recorder_fault",
+				VISITOR,
+				"",
+				"",
+				"drain_failed",
+				"Error: sink down",
+				"",
+			]),
+		);
 
 		const cost = await worker.fetch(
 			new Request(`https://store.test/telemetry/${SNIPPET}/${VISITOR}`, {

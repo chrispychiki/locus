@@ -737,35 +737,28 @@ describe("buffer under concurrency and death", () => {
 		expect((await buffer.claim(1_000_000)).records.length).toBe(1);
 	});
 
-	test("a request error with no error object surfaces an honest error, never null", async () => {
-		// IndexedDB legitimately leaves event.target.error null on some failure paths; a null must
-		// never reach an error report as the four characters "null". Both attempts fail this way, so
-		// the honest message is what the fall reports.
-		const nullErrorDb = () => ({
-			transaction: () => {
-				const tx = {
-					error: null,
-					abort() {},
-					objectStore: () => ({ get: () => ({}) }),
-				};
-				queueMicrotask(() => tx.onerror());
-				return tx;
-			},
-			close: () => {},
-		});
+	test("a failed request surfaces its own error — read at abort, where IndexedDB has set it", async () => {
+		// The spec fires the transaction's error event before it sets the transaction's error slot;
+		// the abort that follows is where the request's error is readable. A real ConstraintError
+		// from a real duplicate key, through fake-indexeddb's spec-ordered events: both attempts hit
+		// the same key, so the fall reports what the request failed with.
 		const unavailable = [];
 		const buffer = await openBuffer(new IDBFactory(), {
 			onUnavailable: (e) => unavailable.push(e),
 		});
-		buffer.db = nullErrorDb();
-		buffer.factory = factoryOf(nullErrorDb);
+		const rec = record(1);
+		const size = new TextEncoder().encode(JSON.stringify(rec)).length;
+		const key = `${rec.event.counter}-${buffer.tag}-${String(buffer.seq + 1).padStart(6, "0")}-s${size}`;
+		await new Promise((resolve, reject) => {
+			const tx = buffer.db.transaction("outbox", "readwrite");
+			tx.objectStore("outbox").add({ squatter: true }, key);
+			tx.oncomplete = resolve;
+			tx.onabort = () => reject(tx.error);
+		});
 
-		await buffer.append(record(1)); // resolves — into memory
+		await buffer.append(rec); // resolves — into memory
 		expect(unavailable.length).toBe(1);
-		expect(unavailable[0]).not.toBeNull();
-		expect(String(unavailable[0])).toContain(
-			"append request failed with no error object",
-		);
+		expect(unavailable[0]?.name).toBe("ConstraintError");
 	});
 
 	test("a transaction aborted with no error object surfaces an honest error, never null", async () => {

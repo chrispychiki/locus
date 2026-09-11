@@ -1342,6 +1342,71 @@ def test_ae_reports_its_sampling_state(tmp_path, capsys, monkeypatch):
     assert read_output(capsys)["sampling"].startswith("none")
 
 
+def test_ae_names_positions_from_the_layout(tmp_path, capsys, monkeypatch):
+    """Rows come back with their positions named from the layout declaration — uniform positions on every row, a metric's own by the row's metric — while aliased columns, positions the layout leaves undeclared for that metric, and rows carrying no metric column stay as the API returned them."""
+    responses = [
+        {
+            "data": [
+                {
+                    "index1": "bgvivc",
+                    "blob1": "slice_started",
+                    "blob2": "v1",
+                    "blob8": "https://a/",
+                    "blob9": "1",
+                    "blob12": "",
+                    "double1": 5,
+                    "double3": 0,
+                    "n": "2",
+                },
+                {
+                    "index1": "bgvivc",
+                    "blob1": "not_a_metric",
+                    "blob2": "v2",
+                    "blob8": "x",
+                },
+                {"blob2": "v3", "blob8": "y", "double1": 1},
+            ],
+            "rows": 3,
+        },
+        {"data": [{"m": 1}], "rows": 1},
+    ]
+    queries = []
+
+    def fake_ae_query(sql):
+        queries.append(sql)
+        return responses[len(queries) - 1]
+
+    monkeypatch.setattr("locus.evidence.analytics_engine.ae_query", fake_ae_query)
+    monkeypatch.setattr("locus.evidence.deployment.bucket", lambda: "b")
+    monkeypatch.setattr("locus.analysis.ae._ae_dataset", lambda: "locus_capture")
+    monkeypatch.setattr("locus.analysis.ae.deployment_root", lambda: tmp_path)
+    monkeypatch.setattr("locus.analysis.cli.deployment_root", lambda: tmp_path)
+    _real_schema_into(tmp_path)
+
+    main(["ae", "SELECT *"])
+    rows = read_output(capsys)["rows"]
+    assert rows[0] == {
+        "snippet": "bgvivc",
+        "metric": "slice_started",
+        "visitor": "v1",
+        "url": "https://a/",
+        "first_slice": "1",
+        "blob12": "",
+        "slice_open_ms": 5,
+        "double3": 0,
+        "n": "2",
+    }, "uniform and per-metric positions named; undeclared ones and aliases untouched"
+    assert rows[1] == {
+        "snippet": "bgvivc",
+        "metric": "not_a_metric",
+        "visitor": "v2",
+        "blob8": "x",
+    }, "a metric the layout does not declare names only the uniform positions"
+    assert rows[2] == {"visitor": "v3", "blob8": "y", "double1": 1}, (
+        "without the metric column, only the uniform positions can be named"
+    )
+
+
 def test_ae_zero_shaped_result_carries_its_diagnosis(tmp_path, capsys, monkeypatch):
     responses = []
     queries = []
