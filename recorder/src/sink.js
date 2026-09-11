@@ -194,14 +194,18 @@ export function httpSink({ url, timeoutMs = 30_000, fetchFn, carrier }) {
 	return {
 		async send(bytes, descriptor) {
 			const controller = new AbortController();
-			let timeout = setTimeout(() => controller.abort(), timeoutMs);
+			const expire = () =>
+				controller.abort(
+					new Error(`sink upload exceeded its ${timeoutMs}ms deadline`),
+				);
+			let timeout = setTimeout(expire, timeoutMs);
 			// A frozen page suspends the request but not the wall clock: the abort deadline expires
 			// during the freeze, and on unfreeze the stale timer fires before the request gets a
 			// moment of runtime, killing an upload at exactly the moment delivery works again. The
 			// Page Lifecycle resume event re-arms a fresh window instead.
 			const onResume = () => {
 				clearTimeout(timeout);
-				timeout = setTimeout(() => controller.abort(), timeoutMs);
+				timeout = setTimeout(expire, timeoutMs);
 			};
 			const doc = typeof document === "undefined" ? null : document;
 			doc?.addEventListener("resume", onResume);

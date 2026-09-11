@@ -127,7 +127,7 @@ describe("the credential-mask posture is unconditional at start()", () => {
 			rrwebRules: universal({ maskAllInputs: false, recordCanvas: true }),
 		});
 		expect(capturedRecordOptions.maskInputOptions.password).toBe(true);
-		expect(capturedRecordOptions.maskAllInputs).toBe(false);
+		expect(capturedRecordOptions.maskAllInputs).toBeUndefined();
 		r.stop();
 	});
 
@@ -215,7 +215,8 @@ describe("the credential-mask posture is unconditional at start()", () => {
 	});
 
 	// The guarantee is a property of the options object handed to rrweb, never something left
-	// implicit in a broader flag.
+	// implicit in a broader flag — and the flag itself never reaches rrweb, whose record() would
+	// resolve its gate from it alone and discard the options beside it.
 	test("password stays explicitly true even alongside maskAllInputs", async () => {
 		const r = await start({
 			sink: noopSink,
@@ -226,7 +227,8 @@ describe("the credential-mask posture is unconditional at start()", () => {
 			}),
 		});
 		expect(capturedRecordOptions.maskInputOptions.password).toBe(true);
-		expect(capturedRecordOptions.maskAllInputs).toBe(true);
+		expect(capturedRecordOptions.maskInputOptions.select).toBe(true);
+		expect(capturedRecordOptions.maskAllInputs).toBeUndefined();
 		r.stop();
 	});
 });

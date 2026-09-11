@@ -321,13 +321,26 @@ export const ROUTE_ALL_INPUTS = Object.freeze({
  * its maskAllInputs, its maskInputFn where it supplied one. rrweb calls a supplied maskInputFn
  * INSTEAD of asterisking, so handing a rule's fn straight to record() would let it take password
  * masking away; composing it under the credential check is what keeps the mask unconditional.
+ * maskAllInputs is handed to rrweb unset for the same reason: record() resolves its gate from that
+ * flag alone when it is true, discarding the maskInputOptions passed beside it, so a rule's flag
+ * would replace this routing with rrweb's own set. The flag's intent is honored inside the fn, and
+ * its gate is rrweb's whole set, select included: a page masked whole has no form state left to
+ * lose, so the site-wide tradeoff ROUTE_ALL_INPUTS makes does not hold there. select is the one
+ * key outside the floor, so a rule's own `select` wins in either direction, beside the flag or not.
  */
 export function maskingPosture(resolved) {
 	const ruleGate = { ...resolved.maskInputOptions };
 	const ruleMasksAll = resolved.maskAllInputs === true;
 	const ruleFn = resolved.maskInputFn;
 	return {
-		maskInputOptions: { ...ruleGate, ...ROUTE_ALL_INPUTS },
+		maskAllInputs: undefined,
+		maskInputOptions: {
+			...ruleGate,
+			...ROUTE_ALL_INPUTS,
+			...(ruleMasksAll && ruleGate.select === undefined
+				? { select: true }
+				: {}),
+		},
 		maskInputFn: (text, element) => {
 			if (isCredentialInput(element)) return "*".repeat(text.length);
 			const tagName = element?.tagName?.toLowerCase();

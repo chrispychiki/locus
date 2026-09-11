@@ -137,15 +137,26 @@ describe("start() host-page safety gates", () => {
 		expect(gated.visitorId.length).toBeGreaterThan(0);
 	});
 
-	test("a verdict on detectMimeTypesConsistent alone records — an Android-webview environment quirk, not automation", async () => {
+	const telemetryLog = () => ({
+		pings: [],
+		emit(e) {
+			this.pings.push(e);
+		},
+	});
+
+	test.each([
+		[
+			"detectMimeTypesConsistent",
+			"Facebook's Android in-app browser patches navigator",
+		],
+		[
+			"detectPluginsLengthInconsistency",
+			"Chromium empties navigator.plugins without its PDF viewer, and Android Chrome always does",
+		],
+	])("a verdict on %s alone records — %s", async (detector) => {
 		botIsBot = true;
-		botDetections = { detectMimeTypesConsistent: { bot: true } };
-		const telemetry = {
-			pings: [],
-			emit(e) {
-				this.pings.push(e);
-			},
-		};
+		botDetections = { [detector]: { bot: true } };
+		const telemetry = telemetryLog();
 		const r = await start({ sink: { send: async () => {} }, telemetry });
 		expect(r).not.toBeNull();
 		expect(
@@ -154,23 +165,82 @@ describe("start() host-page safety gates", () => {
 		await r.stop();
 	});
 
-	test("detectMimeTypesConsistent beside another detector still gates — the exemption is the lone-detector verdict only", async () => {
+	test("an exempted verdict rides every birth as gate_exempt — the admitted cohort's only witness", async () => {
+		botIsBot = true;
+		botDetections = { detectPluginsLengthInconsistency: { bot: true } };
+		const telemetry = telemetryLog();
+		const r = await start({ sink: { send: async () => {} }, telemetry });
+		await settle();
+		const births = telemetry.pings.filter((p) => p.metric === "slice_started");
+		expect(births.length).toBeGreaterThan(0);
+		for (const b of births) {
+			expect(b.gate_exempt).toBe("detectPluginsLengthInconsistency");
+		}
+		await r.stop();
+	});
+
+	test("a clean verdict and an ungated context both birth with gate_exempt empty", async () => {
+		for (const options of [{}, { botDetection: false }]) {
+			const telemetry = telemetryLog();
+			const r = await start({
+				sink: { send: async () => {} },
+				telemetry,
+				...options,
+			});
+			await settle();
+			expect(
+				telemetry.pings.find((p) => p.metric === "slice_started").gate_exempt,
+			).toBe("");
+			await r.stop();
+		}
+	});
+
+	test("a verdict the deployment took ahead of start() is the gate's own — no second BotD run, and its exempted detector rides the births", async () => {
+		botIsBot = true;
+		botDetections = { detectWebDriver: { bot: true } };
+		const telemetry = telemetryLog();
+		const r = await start({
+			sink: { send: async () => {} },
+			telemetry,
+			botVerdict: { isBot: false, detail: "detectMimeTypesConsistent" },
+		});
+		await settle();
+		expect(r).not.toBeNull();
+		expect(
+			telemetry.pings.filter((p) => p.metric === "capture_gated"),
+		).toHaveLength(0);
+		expect(
+			telemetry.pings.find((p) => p.metric === "slice_started").gate_exempt,
+		).toBe("detectMimeTypesConsistent");
+		await r.stop();
+	});
+
+	test("an exempt detector beside any other still gates — the exemption is the lone-detector verdict only", async () => {
 		botIsBot = true;
 		botDetections = {
 			detectMimeTypesConsistent: { bot: true },
 			detectWebDriver: { bot: true },
 		};
-		const telemetry = {
-			pings: [],
-			emit(e) {
-				this.pings.push(e);
-			},
-		};
+		const telemetry = telemetryLog();
 		const r = await start({ sink: { send: async () => {} }, telemetry });
 		expect(r).toBeNull();
 		expect(telemetry.pings).toHaveLength(1);
 		expect(telemetry.pings[0].detail).toBe(
 			"detectMimeTypesConsistent,detectWebDriver",
+		);
+	});
+
+	test("two exempt detectors together still gate", async () => {
+		botIsBot = true;
+		botDetections = {
+			detectMimeTypesConsistent: { bot: true },
+			detectPluginsLengthInconsistency: { bot: true },
+		};
+		const telemetry = telemetryLog();
+		const r = await start({ sink: { send: async () => {} }, telemetry });
+		expect(r).toBeNull();
+		expect(telemetry.pings[0].detail).toBe(
+			"detectMimeTypesConsistent,detectPluginsLengthInconsistency",
 		);
 	});
 

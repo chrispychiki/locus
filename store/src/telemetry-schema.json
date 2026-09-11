@@ -1,15 +1,15 @@
 {
-	"description": "The AE dataset's row layout — the one declaration. The worker imports it to order every row it writes; `locus ae` reads this same file to serve the layout back to readers. Keys are the AE SQL columns themselves, 1-based: blobs[\"8\"] = origin means SELECT blob8. blobs 5-7 are each metric's own, declared per metric under metrics.*; unused slots are written empty. Field semantics, validation, and the clock law live in store/src/telemetry.js. blob_domains states each closed value set as the worker writes it.",
+	"description": "The AE dataset's row layout — the one declaration. The worker imports it to order every row it writes; `locus ae` reads this same file to serve the layout back to readers. Keys are the AE SQL columns themselves, 1-based: blobs[\"5\"] = origin means SELECT blob5. blobs 1-7 are uniform on every row; from 8 onward each metric's own blobs run contiguously, declared per metric under metrics.*, and a row ends where its metric's own blobs end. Field semantics, validation, and the clock law live in store/src/telemetry.js. blob_domains states each closed value set as the worker writes it.",
 	"index1": "snippet",
 	"blobs": {
 		"1": "metric",
 		"2": "visitor",
 		"3": "slice",
 		"4": "version",
-		"5-7": "the metric's own blobs (metrics.*.blobs), unused slots empty",
-		"8": "origin",
-		"9": "user_agent",
-		"10": "as_organization"
+		"5": "origin",
+		"6": "user_agent",
+		"7": "as_organization",
+		"8+": "the metric's own blobs (metrics.*.blobs), contiguous from 8"
 	},
 	"blob_domains": {
 		"first_slice": "\"1\" | \"0\"",
@@ -20,11 +20,16 @@
 	"metrics": {
 		"transport_probe": { "blobs": {}, "doubles": { "1": "ts" } },
 		"slice_started": {
-			"blobs": { "5": "url", "6": "first_slice", "7": "visitor_source" },
+			"blobs": {
+				"8": "url",
+				"9": "first_slice",
+				"10": "visitor_source",
+				"11": "gate_exempt"
+			},
 			"doubles": { "1": "slice_open_ms" }
 		},
 		"page_load": {
-			"blobs": { "5": "url", "6": "referrer", "7": "spa_route" },
+			"blobs": { "8": "url", "9": "referrer", "10": "spa_route" },
 			"doubles": { "1": "ts" }
 		},
 		"cost_sample": {
@@ -38,7 +43,8 @@
 				"6": "delivered_bytes",
 				"7": "ts",
 				"8": "visible_ms"
-			}
+			},
+			"note": "keyed by the slice the page opened on — a page's later slices carry no cost rows of their own. main_thread_ms is cumulative elapsed time across the recorder's synchronous brackets; read it as the delta between a page's consecutive samples against their ts gap — a delta that fills its wall gap is the process suspended mid-bracket, not work"
 		},
 		"chunk_oversize": {
 			"blobs": {},
@@ -49,18 +55,18 @@
 			"doubles": { "1": "gzipped_bytes", "2": "count", "3": "ts" }
 		},
 		"recorder_fault": {
-			"blobs": { "5": "reason", "6": "error", "7": "url" },
+			"blobs": { "8": "reason", "9": "error", "10": "url" },
 			"doubles": { "1": "ts" }
 		},
 		"capture_gated": {
-			"blobs": { "5": "reason", "6": "url", "7": "detail" },
+			"blobs": { "8": "reason", "9": "url", "10": "detail" },
 			"doubles": { "1": "ts" }
 		},
-		"upload_rejected": { "blobs": { "5": "reason" }, "doubles": {} },
-		"upload_transcoded": { "blobs": { "5": "sniff" }, "doubles": {} },
-		"telemetry_rejected": { "blobs": { "5": "reason" }, "doubles": {} },
+		"upload_rejected": { "blobs": { "8": "reason" }, "doubles": {} },
+		"upload_transcoded": { "blobs": { "8": "sniff" }, "doubles": {} },
+		"telemetry_rejected": { "blobs": { "8": "reason" }, "doubles": {} },
 		"worker_error": {
-			"blobs": { "5": "error", "6": "pathname" },
+			"blobs": { "8": "error", "9": "pathname" },
 			"doubles": {}
 		}
 	}

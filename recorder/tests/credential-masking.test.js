@@ -282,6 +282,27 @@ describe("maskingPosture's composed maskInputFn", () => {
 		expect(maskInputFn("hunter2!", el({ type: "password" }))).toBe("********");
 	});
 
+	test("a rule's maskAllInputs never reaches rrweb — it would displace the routing gate with rrweb's own set — and its gate is rrweb's whole set plus hidden, select included", () => {
+		const posture = maskingPosture({ maskAllInputs: true });
+		expect("maskAllInputs" in posture).toBe(true);
+		expect(posture.maskAllInputs).toBeUndefined();
+		expect(posture.maskInputOptions.hidden).toBe(true);
+		expect(posture.maskInputOptions.select).toBe(true);
+		expect(
+			posture.maskInputFn("07", el({ tag: "SELECT", type: "select-one" })),
+		).toBe("**");
+	});
+
+	test("a rule's own select key wins beside maskAllInputs — select is the one key outside the floor", () => {
+		const kept = maskingPosture({
+			maskAllInputs: true,
+			maskInputOptions: { select: false },
+		}).maskInputOptions;
+		expect(kept.select).toBe(false);
+		expect(kept.password).toBe(true);
+		expect(kept.hidden).toBe(true);
+	});
+
 	test("a rule's maskInputFn runs for the fields its gate matches", () => {
 		const { maskInputFn } = maskingPosture({
 			maskInputOptions: { email: true },

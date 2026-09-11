@@ -8,8 +8,8 @@ import SCHEMA from "./telemetry-schema.json";
 
 // The row layout is declared once, in telemetry-schema.json — this module writes by it and
 // `locus ae` serves it back to readers — so a layout edit lands on writer and reader together. The
-// writer's own contract is pinned here: the uniform head every builder passes positionally, and
-// the request-fact tail requestFacts() stamps in header order.
+// writer's own contract is pinned here: the uniform head every builder passes positionally, then
+// the request facts requestFacts() stamps in header order, then the metric's own blobs.
 const declaredAt = (positions) =>
 	positions.map((p) => SCHEMA.blobs[p]).join(",");
 if (declaredAt(["1", "2", "3", "4"]) !== "metric,visitor,slice,version") {
@@ -17,13 +17,15 @@ if (declaredAt(["1", "2", "3", "4"]) !== "metric,visitor,slice,version") {
 		"telemetry-schema.json blobs 1-4 drifted from the writer's contract",
 	);
 }
-if (declaredAt(["8", "9", "10"]) !== "origin,user_agent,as_organization") {
+if (declaredAt(["5", "6", "7"]) !== "origin,user_agent,as_organization") {
 	throw new Error(
-		"telemetry-schema.json blobs 8-10 drifted from the writer's contract",
+		"telemetry-schema.json blobs 5-7 drifted from the writer's contract",
 	);
 }
+const UNIFORM_BLOBS = 7;
+const HEAD_BLOBS = 4;
 
-/** A metric declaration's positional map ({"5": "url", ...}) as its ordered name list, loud on a gap — a hole would silently shift every later value off its declared position. */
+/** A metric declaration's positional map ({"8": "url", ...}) as its ordered name list, loud on a gap — a hole would silently shift every later value off its declared position. */
 function declaredNames(map, first, what) {
 	const positions = Object.keys(map)
 		.map(Number)
@@ -40,9 +42,9 @@ function declaredNames(map, first, what) {
 // AE caps a datapoint's blobs at this many bytes in total and throws past it. The free-text
 // blobs — a url, a recorder's error string — are open-write input with no length bound, so an
 // oversized one would take the whole write down and drop a valid birth out of the completeness
-// denominator. Every blob is fitted to the remaining budget in order, so the identifying blobs
-// (metric, visitor, slice) are never the ones cut, and the request facts — appended last — are
-// the first.
+// denominator. Every blob is fitted to the remaining budget in order, so the uniform blobs
+// (metric, visitor, slice, the request facts) are never the ones cut; the metric's own free text,
+// last on the row, is the first.
 export const AE_BLOB_BYTES = 5120;
 
 // Request facts: what the platform attests about the sender, stamped onto every datapoint the
@@ -53,19 +55,9 @@ export const AE_BLOB_BYTES = 5120;
 // metadata is the network's own name for itself, which for datacenter traffic is the bot tell.
 // All three are attested by the transport rather than claimed by the body.
 //
-// They ride the uniform tail positions the schema declares, on every row: each metric's own
-// blobs are padded out to the slot before the tail, then the facts append. AE has no joins and
-// each metric samples independently, so a cut by sender must name one position that holds on
-// every row; a metric that needs more own blobs than the region holds appends them
-// after the request facts. HEAD_AND_OWN_BLOBS is the width of everything ahead of the facts —
-// the four-blob uniform head plus the own-blob region.
-const HEAD_AND_OWN_BLOBS =
-	Math.min(
-		...Object.keys(SCHEMA.blobs)
-			.filter((k) => /^\d+$/.test(k))
-			.map(Number)
-			.filter((p) => p > 4),
-	) - 1;
+// They ride the uniform positions the schema declares, right after the head, on every row: AE
+// has no joins and each metric samples independently, so a cut by sender must name one position
+// that holds on every row. Each metric's own blobs follow, open-ended.
 const requestFacts = (request) => [
 	request.headers.get("Origin") ?? "",
 	request.headers.get("User-Agent") ?? "",
@@ -105,7 +97,11 @@ function declaredPoint(
 			visitorId,
 			sliceId,
 			version,
-			...named(declaredNames(decl.blobs, 5, `${metric} blobs`), own, "blobs"),
+			...named(
+				declaredNames(decl.blobs, UNIFORM_BLOBS + 1, `${metric} blobs`),
+				own,
+				"blobs",
+			),
 		],
 	};
 	const orderedDoubles = named(
@@ -138,20 +134,15 @@ export function fitted(blobs) {
 	});
 }
 
-/** Fire one datapoint onto AE, the request facts stamped at their uniform positions. The binding is optional — absent in tests and bare deploys, where this no-ops. */
+/** Fire one datapoint onto AE, the request facts stamped at their uniform positions: a builder's blobs are the head then the metric's own, and the facts are spliced in between. The binding is optional — absent in tests and bare deploys, where this no-ops. */
 function record(env, request, snippetId, blobs, doubles) {
-	if (blobs.length > HEAD_AND_OWN_BLOBS) {
-		throw new Error(
-			`datapoint carries ${blobs.length} blobs ahead of the request facts, over HEAD_AND_OWN_BLOBS — the overflow belongs after the facts, or they shift off their uniform positions`,
-		);
-	}
-	const padded =
-		blobs.length < HEAD_AND_OWN_BLOBS
-			? blobs.concat(Array(HEAD_AND_OWN_BLOBS - blobs.length).fill(""))
-			: blobs;
 	const point = {
 		indexes: [snippetId],
-		blobs: fitted([...padded, ...requestFacts(request)]),
+		blobs: fitted([
+			...blobs.slice(0, HEAD_BLOBS),
+			...requestFacts(request),
+			...blobs.slice(HEAD_BLOBS),
+		]),
 	};
 	if (doubles?.length) point.doubles = doubles;
 	env.CAPTURE?.writeDataPoint(point);
@@ -224,7 +215,8 @@ export function telemetryPoint(ping, visitorId) {
 			!isSliceId(ping.sliceId) ||
 			!isString(ping.url) ||
 			!isBoolean(ping.first_slice) ||
-			!isStringOrAbsent(ping.visitor_source)
+			!isStringOrAbsent(ping.visitor_source) ||
+			!isStringOrAbsent(ping.gate_exempt)
 		)
 			return null;
 		// The slice-start ms (the slice id's leading segment) rides as a double so reads can
@@ -233,7 +225,9 @@ export function telemetryPoint(ping, visitorId) {
 		// conversion — and the row's own timestamp is server receive, which files
 		// midnight-straddling and clock-skewed slices into the wrong day.
 		//
-		// The visitor source says how the recorder came by this visitor's id.
+		// The visitor source says how the recorder came by this visitor's id. gate_exempt names
+		// the BotD detector the bot gate exempted on this page context; empty on a clean verdict,
+		// an ungated context, or a bundle that does not send it.
 		return declaredPoint(
 			metric,
 			visitorId,
@@ -243,6 +237,7 @@ export function telemetryPoint(ping, visitorId) {
 				url: ping.url,
 				first_slice: ping.first_slice ? "1" : "0",
 				visitor_source: ping.visitor_source ?? "",
+				gate_exempt: ping.gate_exempt ?? "",
 			},
 			{ slice_open_ms: Number(ping.sliceId.split("-")[0]) },
 		);
@@ -377,8 +372,8 @@ export function telemetryPoint(ping, visitorId) {
  * every metric, known or empty — version is the attestor's: the recorder's bundle
  * version on a recorder ping, this worker's deploy version on a worker-originated
  * point — because a position that means different things per metric cannot be read
- * across metrics. The same rule puts the request facts at their uniform tail
- * positions past every metric's own blobs (record(), above).
+ * across metrics. The same rule puts the request facts at their uniform positions
+ * right after the head, ahead of every metric's own blobs.
  */
 export const uploadRejected = (visitorId, sliceId, version, reason) =>
 	declaredPoint("upload_rejected", visitorId, sliceId, version, { reason });
