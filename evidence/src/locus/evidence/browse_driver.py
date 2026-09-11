@@ -1,6 +1,6 @@
 """The deployment's browser — the daemon that drives the windows.
 
-One persistent Chromium (Locus's own Playwright build, its own profile under `data/browse/profile`, so logins survive across commands), headed so the operator can watch the same windows the agent drives; `LOCUS_BROWSE_HEADLESS=1` when the browser first starts makes it headless for display-less runs. The browser is its own process: the daemon starts it detached on a debugging port and connects over CDP, so the browser and every window in it outlive the daemon. The daemon serves one command at a time over a unix socket; the `locus browse` client boots it on demand — an exclusive lock under the home admits one daemon per home, so racing first commands converge on a single boot — and `quit` shuts every window, the browser, and the daemon down together. The daemon runs the code it booted with, and every command carries the digest of the driver on disk: a mismatch is answered by the daemon shutting down, the client booting the code on disk under that same command, and the new daemon reconnecting to the same browser with every window still there under its same id — the window table is kept beside the profile, and a page's refs live in the page.
+One persistent Chromium (Locus's own Playwright build, its own profile under `data/browse/profile`, so logins survive across commands), headed so the operator can watch the same windows the agent drives (`LOCUS_BROWSE_HEADLESS=1` at start is the test suite's hook for running it headless on a display-less runner). The browser is its own process: the daemon starts it detached on a debugging port and connects over CDP, so the browser and every window in it outlive the daemon. The daemon serves one command at a time over a unix socket; the `locus browse` client boots it on demand — an exclusive lock under the home admits one daemon per home, so racing first commands converge on a single boot — and `quit` shuts every window, the browser, and the daemon down together. The daemon runs the code it booted with, and every command carries the digest of the driver on disk: a mismatch is answered by the daemon shutting down, the client booting the code on disk under that same command, and the new daemon reconnecting to the same browser with every window still there under its same id — the window table is kept beside the profile, and a page's refs live in the page.
 
 Instances are windows: each is its own OS window, addressed `w1`, `w2`, …, and every command names the window it acts on. There is no shared active window, so any number of agents drive their own windows through the one daemon without colliding, and an agent building in one window never disturbs a window the operator is looking at. `open` with no id makes a window for the page; when some window already holds that page, it refuses and names that window, because which window an agent means is the agent's to say. `show` is the only command that brings one to the front. `read` snapshots a window's page — ref-tagged interactables (`e1`, `e2`, …) plus visible text — and refs stay resolvable until that page navigates; acting on a stale ref fails loud and says to read again. The snapshot walk pierces open shadow roots; closed shadow content and cross-origin frames are not in it.
 
@@ -287,6 +287,13 @@ def _http_ok(url: str) -> bool:
         return False
 
 
+def _free_port() -> int:
+    """A free loopback port, released for the browser to bind."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _running(pid: int) -> bool:
     """Whether the process is alive. The daemon that started the browser is its parent, and a child that has exited stays a zombie that signal 0 still reaches until it is reaped — so a child is asked through waitpid, which reaps it, and only a process that is not ours is asked with the signal."""
     try:
@@ -353,13 +360,15 @@ class Browser:
         import shutil
 
         shutil.rmtree(profile / "Default" / "Sessions", ignore_errors=True)
-        port_file = profile / "DevToolsActivePort"
-        port_file.unlink(missing_ok=True)
+        # A fixed port, chosen here: with `--remote-debugging-port=0` Chromium reports
+        # `navigator.webdriver` true in every page and bot gates, the recorder's included,
+        # refuse the window; under a fixed port the same browser reports false.
+        port = _free_port()
         log = (self.home / "browser.log").open("a")
         args = [
             self._pw.chromium.executable_path,
             f"--user-data-dir={profile}",
-            "--remote-debugging-port=0",
+            f"--remote-debugging-port={port}",
             *CHROME_ARGS,
             *(["--headless=new", "--window-size=1280,800"] if headless else []),
         ]
@@ -370,31 +379,23 @@ class Browser:
             stderr=log,
             start_new_session=True,
         )
-        deadline = time.time() + 60
-        while not port_file.exists() and time.time() < deadline:
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    f"the browser exited during start (code {proc.returncode}) — see {self.home / 'browser.log'}"
-                )
-            time.sleep(0.1)
-        if not port_file.exists():
-            proc.kill()
-            raise RuntimeError(
-                f"the browser never opened its debugging port — see {self.home / 'browser.log'}"
-            )
-        port = port_file.read_text().splitlines()[0].strip()
         info = {
             "pid": proc.pid,
             "endpoint": f"http://127.0.0.1:{port}",
             "headless": headless,
         }
-        # The port file lands before the endpoint answers; a connect in that gap hangs
-        # on the browser's half-open server, so readiness is the endpoint answering.
+        # Readiness is the endpoint answering: the socket opens before the server behind
+        # it does, and a connect in that gap hangs on the half-open server.
+        deadline = time.time() + 60
         while not _http_ok(info["endpoint"] + "/json/version"):
-            if time.time() > deadline or proc.poll() is not None:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"the browser exited during start (code {proc.returncode}) — see {self.home / 'browser.log'}"
+                )
+            if time.time() > deadline:
                 proc.kill()
                 raise RuntimeError(
-                    f"the browser opened its debugging port but never answered on it — see {self.home / 'browser.log'}"
+                    f"the browser never answered on its debugging port — see {self.home / 'browser.log'}"
                 )
             time.sleep(0.1)
         self.record.write_text(json.dumps(info))

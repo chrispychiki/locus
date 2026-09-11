@@ -13,9 +13,9 @@ import time
 from pathlib import Path
 
 HELP = """locus browse drives this deployment's browser — headed, so the operator can watch the same
-windows the agent drives (LOCUS_BROWSE_HEADLESS=1 at first use runs it headless). Each instance is
-its own window, addressed w1, w2, …; every command names the window it acts on, so agents working
-in different windows never disturb each other's pages — one the operator is looking at included.
+windows the agent drives. Each instance is its own window, addressed w1, w2, …; every command names
+the window it acts on, so agents working in different windows never disturb each other's pages —
+one the operator is looking at included.
 Commands run one at a time across all windows, so a slow command in one window holds the rest. State
 survives between commands: windows stay open, logins stick, refs from `read` stay clickable until
 that window navigates. Every reply opens with the window it acted on.
