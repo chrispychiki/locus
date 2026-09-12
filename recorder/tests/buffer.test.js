@@ -4,6 +4,7 @@ import { IDBFactory } from "fake-indexeddb";
 import {
 	BUFFER_ABSENT,
 	BUFFER_NOT_DURABLE,
+	BYTES_KEY,
 	openBuffer,
 	recordBytes,
 } from "../src/buffer.js";
@@ -737,11 +738,13 @@ describe("buffer under concurrency and death", () => {
 		expect((await buffer.claim(1_000_000)).records.length).toBe(1);
 	});
 
-	test("a failed request surfaces its own error — read at abort, where IndexedDB has set it", async () => {
-		// The spec fires the transaction's error event before it sets the transaction's error slot;
-		// the abort that follows is where the request's error is readable. A real ConstraintError
-		// from a real duplicate key, through fake-indexeddb's spec-ordered events: both attempts hit
-		// the same key, so the fall reports what the request failed with.
+	test("an append whose key is already stored is its own earlier attempt's commit — durable, counted once, never a fall", async () => {
+		// The fleet shape: the first attempt's transaction committed after its deadline (or completed
+		// without delivering the success event), the buffer reopened and reran the same append, and
+		// the add collided with the row it had already written. Plant that committed row — the
+		// record under the key this instance will mint next, counted — and append: the ConstraintError
+		// is the commit's witness, so the append resolves stored, IndexedDB stays the buffer, the
+		// counter holds one copy, and the outbox holds one record.
 		const unavailable = [];
 		const buffer = await openBuffer(new IDBFactory(), {
 			onUnavailable: (e) => unavailable.push(e),
@@ -750,15 +753,101 @@ describe("buffer under concurrency and death", () => {
 		const size = new TextEncoder().encode(JSON.stringify(rec)).length;
 		const key = `${rec.event.counter}-${buffer.tag}-${String(buffer.seq + 1).padStart(6, "0")}-s${size}`;
 		await new Promise((resolve, reject) => {
-			const tx = buffer.db.transaction("outbox", "readwrite");
-			tx.objectStore("outbox").add({ squatter: true }, key);
+			const tx = buffer.db.transaction(["outbox", "meta"], "readwrite");
+			tx.objectStore("outbox").add(rec, key);
+			tx.objectStore("meta").put(size, BYTES_KEY);
 			tx.oncomplete = resolve;
 			tx.onabort = () => reject(tx.error);
 		});
 
-		await buffer.append(rec); // resolves — into memory
+		await buffer.append(rec);
+		expect(unavailable.length).toBe(0);
+		expect(buffer.fallen).toBeNull();
+		expect(buffer.bytes).toBe(size);
+		const batch = await buffer.claim(1_000_000);
+		expect(batch.records.length).toBe(1);
+	});
+
+	test("an append whose key is already stored makes no room for itself — at the ceiling, nothing older is evicted", async () => {
+		// Same committed-then-retried shape, with the backlog exactly at the ceiling once the row is
+		// counted: an older record plus the committed row fill it to the byte. The row already holds
+		// its space, so the retry must evict nothing and leave both records for the claim.
+		const evictions = [];
+		const buffer = await openBuffer(new IDBFactory());
+		buffer.onEvict = (records, bytes) => evictions.push({ records, bytes });
+		const older = record(1);
+		const rec = record(2);
+		const size = new TextEncoder().encode(JSON.stringify(rec)).length;
+		await buffer.append(older);
+		buffer.maxBacklogBytes = buffer.bytes + size;
+		const key = `${rec.event.counter}-${buffer.tag}-${String(buffer.seq + 1).padStart(6, "0")}-s${size}`;
+		await new Promise((resolve, reject) => {
+			const tx = buffer.db.transaction(["outbox", "meta"], "readwrite");
+			tx.objectStore("outbox").add(rec, key);
+			tx.objectStore("meta").put(buffer.maxBacklogBytes, BYTES_KEY);
+			tx.oncomplete = resolve;
+			tx.onabort = () => reject(tx.error);
+		});
+
+		await buffer.append(rec);
+		expect(buffer.fallen).toBeNull();
+		expect(evictions).toEqual([]);
+		expect(buffer.bytes).toBe(buffer.maxBacklogBytes);
+		const batch = await buffer.claim(1_000_000);
+		expect(batch.records.map((r) => r.event.counter)).toEqual([
+			older.event.counter,
+			rec.event.counter,
+		]);
+	});
+
+	test("a failed request surfaces its own error — read at abort, where IndexedDB has set it", async () => {
+		// The spec fires the transaction's error event before it sets the transaction's error slot;
+		// the abort that follows is where the request's error is readable. A request error that is
+		// not the append's own key collision stays unhandled, the transaction aborts, and the fall
+		// reports what the request failed with.
+		const failing = () => ({
+			transaction: () => {
+				const error = Object.assign(new Error("data error"), {
+					name: "DataError",
+				});
+				const tx = {
+					error: null,
+					abort() {},
+					objectStore: () => ({
+						get: () => {
+							const request = {};
+							queueMicrotask(() => {
+								request.result = undefined;
+								request.onsuccess?.();
+							});
+							return request;
+						},
+						put: () => ({}),
+						add: () => {
+							const request = { error };
+							queueMicrotask(() => {
+								request.onerror?.({ preventDefault() {} });
+								tx.error = error;
+								tx.onabort?.();
+							});
+							return request;
+						},
+					}),
+				};
+				return tx;
+			},
+			close: () => {},
+		});
+		const unavailable = [];
+		const buffer = await openBuffer(new IDBFactory(), {
+			onUnavailable: (e) => unavailable.push(e),
+		});
+		buffer.db = failing();
+		buffer.factory = factoryOf(failing);
+
+		await buffer.append(record(1)); // resolves — into memory
 		expect(unavailable.length).toBe(1);
-		expect(unavailable[0]?.name).toBe("ConstraintError");
+		expect(unavailable[0]?.name).toBe("DataError");
 	});
 
 	test("a transaction aborted with no error object surfaces an honest error, never null", async () => {

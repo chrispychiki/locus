@@ -9,7 +9,7 @@
  *
  * **Every operation has a deadline, and a dead operation aborts its transaction.** A browser that force-closes the connection under storage pressure or page suspension may reject the in-flight requests, or drop them, firing neither success nor error — a promise that never settles. So silence past the deadline rejects like any other failure: the connection is presumed dead and the buffer reopens. The deadline aborts the transaction rather than abandoning it, because readwrite transactions on one store serialize across connections: a pending transaction — including one still queued behind the lock, and one whose page froze mid-flight — holds or waits on the store lock against every sibling and successor context of this visitor until it finishes, and abort releases that hold immediately even for a transaction that never started (verified in Chromium).
  *
- * Keys are minted by the writer, never by IndexedDB's key generator: several page contexts (tabs, rapid renavigations) share this one per-visitor database over separate connections, and the generator's state is cached per connection, so concurrent connections can be handed colliding keys (a ConstraintError on a plain add — observed in Chromium). Every key is a string ordered timestamp-major and suffixed with a per-context tag plus a per-instance sequence, so keys are collision-free by construction and cursor order stays arrival order.
+ * Keys are minted by the writer, never by IndexedDB's key generator: several page contexts (tabs, rapid renavigations) share this one per-visitor database over separate connections, and the generator's state is cached per connection, so concurrent connections can be handed colliding keys (a ConstraintError on a plain add — observed in Chromium). Every key is a string ordered timestamp-major and suffixed with a per-context tag plus a per-instance sequence, so keys are collision-free by construction and cursor order stays arrival order. The one add that can collide is an append's own retry, when a first attempt whose outcome was hidden — deadline passed, or completion without the request's success — had committed. That ConstraintError is the commit's witness and resolves the append as stored (addOwn).
  *
  * An outbox key also carries the record's serialized byte size, in a marked final segment, so measuring a stored record never re-serializes it; a row whose key carries no size (another bundle's write) is recounted where its size is needed. The size lives in the key and nowhere else because the key is the one part of the row a sibling context never interprets: the record value must stay the verbatim record — it flows into chunks, and the contexts sharing this database need not all run this bundle, so a changed value shape would be unreadable to the others — while keys are only ordered by and deleted by.
  *
@@ -33,7 +33,7 @@
  */
 
 const DB_NAME = "locus-recorder";
-const BYTES_KEY = "backlogBytes";
+export const BYTES_KEY = "backlogBytes";
 const STORES = ["outbox", "inflight", "meta"];
 
 // Capture-context rows share the meta store with the byte counter, under a key prefix no slice id
@@ -106,6 +106,17 @@ const contextTag = () =>
 /** Issue a request and hand its result to the next step — the sanctioned chaining point, because the step runs inside the request's own success handler, where the transaction is still live. A request that errors goes unhandled on purpose: IndexedDB aborts the transaction, and the transaction's onabort surfaces it. */
 function then(request, step) {
 	request.onsuccess = () => step(request.result);
+}
+
+/** Add under a key only this instance can mint, and tell the next step whether the row was already there. A ConstraintError is this append's earlier attempt having committed: consumed (preventDefault keeps the transaction alive) and reported as stored(true). Any other request error stays unhandled, so the transaction aborts and onabort surfaces it. */
+function addOwn(store, value, key, stored) {
+	const request = store.add(value, key);
+	request.onsuccess = () => stored(false);
+	request.onerror = (event) => {
+		if (request.error?.name !== "ConstraintError") return;
+		event.preventDefault();
+		stored(true);
+	};
 }
 
 export function recordBytes(record) {
@@ -437,30 +448,36 @@ class IdbBuffer {
 								// issued after them. The ring check sits out this one append — no base to
 								// measure against.
 								if (typeof base !== "number") {
-									return then(outbox.add(record, key), () =>
+									return addOwn(outbox, record, key, () =>
 										done({ evicted: [], evictedBytes: 0, total: null }),
 									);
 								}
-								const evicted = [];
-								let evictedBytes = 0;
-								const admit = () =>
-									then(outbox.add(record, key), () => {
-										const total = base - evictedBytes + size;
+								// The add goes first, because whether the row was already there decides what the
+								// ring must make room for: a row already stored was counted when it was stored, so
+								// only a new row adds its size, and only this attempt's evictions move the counter.
+								addOwn(outbox, record, key, (already) => {
+									const added = already ? 0 : size;
+									const evicted = [];
+									let evictedBytes = 0;
+									const settle = () => {
+										const total = base - evictedBytes + added;
 										tx.objectStore("meta").put(total, BYTES_KEY);
 										done({ evicted, evictedBytes, total });
-									});
-								const room = () =>
-									base - evictedBytes + size <= this.maxBacklogBytes;
-								if (room()) return admit();
-								const cursor = outbox.openCursor();
-								cursor.onsuccess = () => {
-									const current = cursor.result;
-									if (!current || room()) return admit();
-									evicted.push(current.value);
-									evictedBytes += rowBytes(current.key, current.value);
-									current.delete();
-									current.continue();
-								};
+									};
+									const room = () =>
+										base - evictedBytes + added <= this.maxBacklogBytes;
+									if (room()) return settle();
+									const cursor = outbox.openCursor();
+									cursor.onsuccess = () => {
+										const current = cursor.result;
+										if (!current || room()) return settle();
+										if (current.key === key) return current.continue();
+										evicted.push(current.value);
+										evictedBytes += rowBytes(current.key, current.value);
+										current.delete();
+										current.continue();
+									};
+								});
 							});
 						},
 					),
@@ -488,10 +505,15 @@ class IdbBuffer {
 	claim(maxBytes) {
 		return this.dispatch(
 			async () => {
-				const batchKey = this.nextKey(String(Date.now()).padStart(14, "0"));
 				let drained = false;
 				const batch = await this.run("claim", () =>
 					this.transact("claim", STORES, "readwrite", (tx, done) => {
+						// Minted per attempt. A retry after a hidden commit finds the outbox drained and
+						// returns null, the committed batch waiting in inflight for the next drain — unless
+						// a sibling context appended meanwhile, in which case the retry claims those records
+						// as a new batch; under the first attempt's key that add would collide with the
+						// committed row and demote the page to memory.
+						const batchKey = this.nextKey(String(Date.now()).padStart(14, "0"));
 						const outbox = tx.objectStore("outbox");
 						const records = [];
 						const keys = [];
