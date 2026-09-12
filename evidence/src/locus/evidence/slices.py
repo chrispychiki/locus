@@ -5,7 +5,7 @@ The recorder owns the boundary, not the reader. Every event it emits is stamped 
 A slice's head is its covering snapshot: rrweb emits Meta then FullSnapshot as one synchronous pair (takeFullSnapshot wrappedEmits the Meta then immediately the FullSnapshot: rrweb packages/rrweb/src/record/index.ts), so a replayable slice is one that *contains* that adjacent pair. It need not open on it — a page context opens its slice the moment it starts, before rrweb has a DOM to capture, so a marker can precede the Meta inside the slice it belongs to.
 
 A slice that cannot keep the replayable promise is discarded whole with a counted reason. The four, and the whole set, are `discard_reason` — the criterion this module owns and every reader of a slice asks, so nothing downstream re-derives what replayable means:
-- NO_SNAPSHOT_REASON — the slice holds no Meta at all: the page ended before rrweb ever captured its DOM. Nothing was lost in transit; there was never a snapshot. Never rescuable — the events belong to a document that no prior slice's DOM can cover.
+- NO_SNAPSHOT_REASON — the slice holds no Meta at all: the page ended before rrweb captured its DOM, or the head chunk has not arrived (a page that dies before its first drain ships only its hidden marker). A `page_load` ping, which fires on the first snapshot, tells the two apart. Never rescuable — the events belong to a document no prior slice's DOM can cover; a head chunk that lands later re-materializes the slice.
 - ORPHAN_REASON — a Meta whose FullSnapshot never arrived. The document is real and continues; only the snapshot is missing, which is what makes this class, and only this class, a rescue candidate.
 - A Meta recording a zero-dimension viewport — hidden prerender contexts, pages no human ever saw.
 - DAMAGED_SNAPSHOT_REASON — a FullSnapshot with no root node: the document it covers cannot be reconstructed.
@@ -31,7 +31,7 @@ from .hydrate import raw_event
 from .rrweb_constants import EventType
 
 ORPHAN_REASON = "no covering FullSnapshot after Meta"
-NO_SNAPSHOT_REASON = "no snapshot: the page ended before rrweb captured its DOM"
+NO_SNAPSHOT_REASON = "no snapshot: the slice's chunks carry no Meta"
 ZERO_VIEWPORT_REASON = "zero-dimension viewport in Meta"
 DAMAGED_SNAPSHOT_REASON = "damaged snapshot: the FullSnapshot carries no root node, so the document it covers cannot be reconstructed"
 RESCUE_MAX_GAP_MS = 10_000
@@ -259,7 +259,7 @@ def opens_a_new_document(conn: sqlite3.Connection, slice_row) -> bool:
 
 
 def opened_a_page(conn: sqlite3.Connection, slice_row) -> bool:
-    """Whether this slice is a page context opening in front of a person — a page load, whatever became of the recording after. A head by opens_a_new_document is one; so is a slice with no Meta at all, because a checkout is minted from its Meta and a slice without one is a page that died before rrweb captured its DOM. A prerendered context (a zero-dimension viewport) is a page nobody saw, and is not."""
+    """Whether this slice is a page context opening in front of a person — a page load, whatever became of the recording after. A head by opens_a_new_document is one; so is a slice with no Meta at all, because a checkout is minted from its Meta and a slice without one is a page context that opened and whose head never arrived. A prerendered context (a zero-dimension viewport) is a page nobody saw, and is not."""
     if slice_row["reason"] == NO_SNAPSHOT_REASON:
         return True
     if (slice_row["reason"] or "").startswith(ZERO_VIEWPORT_REASON):
