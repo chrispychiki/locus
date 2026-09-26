@@ -196,6 +196,9 @@ def format_event_line(
         return f"{ts} {kind} — page content:\n{body}"
     if kind == Kind.MUTATION:
         return f"{ts} {kind} — content change:\n{stream_body(row['diff'])}"
+    if kind == Kind.IDENTIFY:
+        user = row["user_id"]
+        return f"{ts} {kind}" + (f" user_id={user!r}" if user is not None else "")
 
     parts = [ts, kind]
     if row["url"]:

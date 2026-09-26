@@ -96,6 +96,7 @@ def row(ts, kind, **kw):
         "md": None,
         "diff": None,
         "raw_json": pack_raw("{}"),
+        "user_id": None,
         "device": None,
         "os": None,
         "browser": None,
@@ -1185,6 +1186,64 @@ def test_window_bounds_split_a_slice_into_pieces(distilled_db, tmp_path):
         resolve_window(conn, [slice_id], None, bounds["lo"])
 
 
+def test_an_identify_rides_the_stream_and_displaces_no_slice_page(tmp_path):
+    """The operator's user id reaches the model as a stream line of its own, raw. An Identify ahead of a slice's snapshot names no page, so every slice still opens on the page it opened on."""
+    import subprocess
+
+    from _support import DISTILL, FIXTURE, identify, read_recording
+    from locus.analysis.session_context import window_pages
+    from locus.evidence.hydrate import hydrate
+    from locus.evidence.slices import materialize_slices
+
+    visitor_id, events = read_recording(FIXTURE)
+    by_slice: dict[str, list[dict]] = {}
+    for event in events:
+        by_slice.setdefault(event["_envelope"]["recorder_slice"], []).append(event)
+    identified = list(events)
+    for recorder_slice, members in by_slice.items():
+        ts = min(e["timestamp"] for e in members) - 5
+        identified.append(
+            {
+                **identify(ts, "user-42@example.com"),
+                "counter": f"{ts}000999",
+                "_envelope": {"recorder_slice": recorder_slice},
+            }
+        )
+
+    def loaded(name, recording):
+        path = tmp_path / f"{name}.db"
+        conn = connect(path)
+        hydrate(conn, visitor_id, recording)
+        materialize_slices(conn, visitor_id)
+        subprocess.run(
+            ["bun", str(DISTILL), str(path)], check=True, capture_output=True
+        )
+        slice_ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM slices WHERE status = 'replayable' ORDER BY start_ts"
+            )
+        ]
+        return conn, slice_ids
+
+    baseline, baseline_ids = loaded("baseline", events)
+    conn, slice_ids = loaded("identified", identified)
+    assert [(url, kind) for url, kind, _ in window_pages(conn, slice_ids)] == [
+        (url, kind) for url, kind, _ in window_pages(baseline, baseline_ids)
+    ]
+
+    conversation = FakeConversation()
+    compose_window(
+        conn,
+        conversation,
+        resolve_window(conn, slice_ids),
+        {},
+        site_contexts={"site": "x"},
+    )
+    text = "\n".join(conversation.texts)
+    assert text.count("Identify user_id='user-42@example.com'") == len(slice_ids)
+
+
 def test_undistilled_slice_fails_loud(tmp_path):
     from _support import FIXTURE, read_recording
     from locus.evidence.hydrate import hydrate
@@ -1447,3 +1506,30 @@ def test_a_short_repeated_value_prints_whole():
     assert "chars:" not in joined
     assert joined.count('value="hello"') == 2
     assert "input='hello'" in joined
+
+
+def test_head_event_skips_identify_but_never_an_unattested_head(tmp_path):
+    from locus.analysis.session_context import _head_event
+    from locus.evidence.rrweb_constants import EventType
+
+    conn = connect(tmp_path / "head.db")
+    events = [
+        (1000, EventType.Identify, "Identify", None),
+        (1001, EventType.PageHidden, "PageHidden", None),
+        (1002, EventType.PageLoad, "PageLoad", "https://example.com/later"),
+    ]
+    for ts, type_, kind, url in events:
+        conn.execute(
+            "INSERT INTO events (id, visitor_id, timestamp, counter, type, type_str, raw_json, content_hash, slice_id, url) "
+            "VALUES (?, 'v', ?, ?, ?, ?, ?, ?, 1, ?)",
+            (ts, ts, f"{ts}000001", type_, kind, pack_raw("{}"), f"h{ts}", url),
+        )
+    conn.commit()
+
+    head = _head_event(conn, 1)
+    assert head["timestamp"] == 1001, (
+        "an Identify is passed over; the next event is the head"
+    )
+    assert head["url"] is None, (
+        "a head that carries no url stays unattested — the read never skips forward to a later page event"
+    )

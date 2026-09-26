@@ -14,6 +14,7 @@ class EventType:
     PageLoad = 69
     PageVisible = 70
     PageHidden = 71
+    Identify = 72
 
 
 EVENTTYPE_NAMES = {
@@ -28,6 +29,7 @@ EVENTTYPE_NAMES = {
     69: "PageLoad",
     70: "PageVisible",
     71: "PageHidden",
+    72: "Identify",
 }
 
 class IncrementalSource:

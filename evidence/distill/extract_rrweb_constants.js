@@ -13,7 +13,7 @@
  *   src/locus/evidence/rrweb_constants.py
  *   ../recorder/src/rrweb_constants.js
  *
- * Locus custom event types come from the recorder, not rrweb, and are appended here as the single declaration site: 69 PageLoad (arrival context), 70 PageVisible / 71 PageHidden (visibility transitions — "the visitor left" is hidden-then-silence, inferred downstream, never asserted by the recorder).
+ * Locus custom event types come from the recorder, not rrweb, and are appended here as the single declaration site: 69 PageLoad (arrival context), 70 PageVisible / 71 PageHidden (visibility transitions — "the visitor left" is hidden-then-silence, inferred downstream, never asserted by the recorder), 72 Identify (the operator's own user id, attached to the cookie-keyed visitor).
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import {
@@ -26,7 +26,12 @@ import {
 } from "@rrweb/types";
 import { version } from "@rrweb/types/package.json";
 
-const CUSTOM_EVENT_TYPES = { PageLoad: 69, PageVisible: 70, PageHidden: 71 };
+const CUSTOM_EVENT_TYPES = {
+	PageLoad: 69,
+	PageVisible: 70,
+	PageHidden: 71,
+	Identify: 72,
+};
 
 const numeric = (enumObject) =>
 	Object.entries(enumObject).filter(([, value]) => typeof value === "number");

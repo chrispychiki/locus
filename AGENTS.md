@@ -9,7 +9,7 @@ The terms this system speaks precisely, defined once. The operator won't necessa
 - **operator** — the human whose Locus this is: their site, their data, their money. Speaks intent.
 - **agent** — you, the operator's interface to all of Locus: hears intent, drives the tools, supplies the judgment; runs in whatever harness the operator brought — Locus ships none.
 - **model** — the vision model `locus analyze` puts recorded evidence and a question to. "The model" never means the agent's own.
-- **visitor** — the persistent identity the recorder mints: a first-party cookie, so one person is one visitor per browser, not an authenticated user.
+- **visitor** — the persistent identity the recorder mints: a first-party cookie, so one person is one visitor per browser.
 - **session** — a visitor's episode on the site. Colloquial use is free; any quantification takes its boundary from `config/definitions.toml`, where the operator's meanings live, applied to the recordings as the db's `sessions` table.
 - **chunk** — the recorder's upload unit: a gzipped, self-describing batch of events; arrives arbitrarily late by design.
 - **store** — the operator's own object store, where chunks land; the agent reads it directly with the operator's credentials.

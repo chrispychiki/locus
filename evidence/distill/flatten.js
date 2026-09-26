@@ -78,6 +78,7 @@ export function flatten(event, mirror, counters) {
 		href: null,
 		title: null,
 		referrer: null,
+		user_id: null,
 		pointer_type: null,
 		extra: null,
 		hidden: null,
@@ -128,6 +129,8 @@ export function flatten(event, mirror, counters) {
 		if (k === "url" || k === "href") cols.url = str(v);
 		else if (k === "title") cols.title = str(v);
 		else if (k === "referrer") cols.referrer = str(v);
+		else if (k === "userId" && event.type === EventType.Identify)
+			cols.user_id = str(v);
 		else if (k === "x") cols.x = num(v);
 		else if (k === "y") cols.y = num(v);
 		else if (k === "pointerType") {

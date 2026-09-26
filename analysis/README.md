@@ -57,7 +57,7 @@ Two transports have that property, and `model/factory.py` is the only place a mo
   The declaration ships with the repo carrying a default weekly cap, so a fresh clone is walled from its first paid call; the file is the only truth — what it declares is the walls, and an operator who wants no walls deletes the caps.
   The check is check-then-spend: one in-flight call can carry spend past a cap, and the next paid call refuses.
   Every Gemini card declares prices; the shipped local cards declare none and spend nothing.
-  The spend block of `locus status` reports each period's spend against its cap, and on a priced model the price report states the turn-1 input dollars — budgeting a multi-analysis investigation is the agent's own arithmetic over those two surfaces.
+  The spend block of `locus status` reports each period's spend against its cap, and on a priced model the price report states the turn-1 input dollars — to budget a multi-analysis investigation, do the arithmetic yourself over those two surfaces.
 - **Declared prices are the record; the registry is the check.** Enforcement reads only the card's declared prices.
   They are verified best-effort against LiteLLM's public price registry wherever a price is stated (the price report, the first billed call of a process, `locus doctor`) — fetched at most once per UTC day per machine, loud on a mismatch with both numbers, and honestly `unverified` when the model is unlisted or the registry unreachable.
 

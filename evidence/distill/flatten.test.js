@@ -90,6 +90,34 @@ test("custom recorder events translate to readable names", () => {
 	expect(hidden.url).toBe("https://x.test/");
 });
 
+test("an Identify lands its user id in user_id, and nothing else does", () => {
+	const counters = { wrongTyped: 0 };
+	const identify = flatten(
+		{ type: EventType.Identify, data: { userId: "auth0|abc" } },
+		new LightweightMirror(),
+		counters,
+	);
+	expect(identify.type_str).toBe("Identify");
+	expect(identify.user_id).toBe("auth0|abc");
+	expect(identify.extra).toBeNull();
+
+	const wrong = flatten(
+		{ type: EventType.Identify, data: { userId: 42 } },
+		new LightweightMirror(),
+		counters,
+	);
+	expect(wrong.user_id).toBeNull();
+	expect(counters.wrongTyped).toBe(1);
+
+	const elsewhere = flatten(
+		{ type: EventType.Custom, data: { tag: "t", userId: "u" } },
+		new LightweightMirror(),
+		{ wrongTyped: 0 },
+	);
+	expect(elsewhere.user_id).toBeNull();
+	expect(JSON.parse(elsewhere.extra).userId).toBe("u");
+});
+
 test("input events carry the text, mousemove the last position", () => {
 	const input = flatten(
 		{

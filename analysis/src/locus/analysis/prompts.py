@@ -50,7 +50,8 @@ def system_prompt() -> str:
     - MouseMove and Scroll are sampled several times a second; a gap shorter than a second between them is not a pause.
     - Screenshots fall at a fixed interval wherever the visitor was active, plus each slice's first captured moment and its last. A slice's first events can precede its first capture, so they have no screenshot.
     - A mouse pointer is drawn on the screenshots, red while the button is down, and sits top-left when its position for that frame is unknown. A touch recording draws no pointer; a ring marks where a finger is down.
-    - More than one visitor: each recording follows its own SUMMARY block naming the visitor. Keep them separate.
+    - An Identify line is the site naming who is logged in, by its own user id, as of that moment: the page loaded with them signed in, they logged in, or they switched accounts.
+    - More than one visitor: each recording follows its own SUMMARY block naming the visitor. Keep them separate. A visitor is one browser, so the same user id on two visitors is one account on two browsers.
 </RECORDING_FORMAT>
 """
 

@@ -16,6 +16,7 @@ class Kind:
     PAGE_LOAD = EVENTTYPE_NAMES[EventType.PageLoad]
     PAGE_VISIBLE = EVENTTYPE_NAMES[EventType.PageVisible]
     PAGE_HIDDEN = EVENTTYPE_NAMES[EventType.PageHidden]
+    IDENTIFY = EVENTTYPE_NAMES[EventType.Identify]
     MUTATION = INCREMENTALSOURCE_NAMES[IncrementalSource.Mutation]
     MOUSE_MOVE = INCREMENTALSOURCE_NAMES[IncrementalSource.MouseMove]
     VIEWPORT_RESIZE = INCREMENTALSOURCE_NAMES[IncrementalSource.ViewportResize]
@@ -35,10 +36,11 @@ class Kind:
     CONTEXT_MENU = MOUSEINTERACTIONS_NAMES[MouseInteractions.ContextMenu]
     FOCUS = MOUSEINTERACTIONS_NAMES[MouseInteractions.Focus]
     BLUR = MOUSEINTERACTIONS_NAMES[MouseInteractions.Blur]
-    # What an event stream prints as a line of its own: the visitor acting, and the page's
-    # presentation changing. Every other kind rrweb records — a stylesheet rule or adoption, a
-    # font load, a console line, a custom-element definition, a canvas draw, and any kind a
-    # later rrweb adds — is the page's own machinery, counted and never printed.
+    # What an event stream prints as a line of its own: the visitor acting, the page's
+    # presentation changing, and the site naming who is logged in. Every other kind rrweb
+    # records — a stylesheet rule or adoption, a font load, a console line, a custom-element
+    # definition, a canvas draw, and any kind a later rrweb adds — is the page's own machinery,
+    # counted and never printed.
     STREAM = frozenset(
         {
             META,
@@ -46,6 +48,7 @@ class Kind:
             PAGE_LOAD,
             PAGE_VISIBLE,
             PAGE_HIDDEN,
+            IDENTIFY,
             MUTATION,
             MOUSE_MOVE,
             VIEWPORT_RESIZE,

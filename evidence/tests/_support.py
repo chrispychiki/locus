@@ -129,6 +129,10 @@ def hidden(ts, url=URL):
     return {"type": EventType.PageHidden, "timestamp": ts, "data": {"url": url}}
 
 
+def identify(ts, user_id):
+    return {"type": EventType.Identify, "timestamp": ts, "data": {"userId": user_id}}
+
+
 def env(event, recorder_slice):
     return {**event, "_envelope": {"recorder_slice": recorder_slice}}
 

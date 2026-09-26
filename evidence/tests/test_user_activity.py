@@ -8,6 +8,7 @@ from locus.evidence import user_activity
 from locus.evidence.db import connect
 from locus.evidence.kinds import Kind
 from locus.evidence.rrweb_constants import (
+    EVENTTYPE_NAMES,
     EventType,
     IncrementalSource,
     MouseInteractions,
@@ -81,6 +82,7 @@ def test_the_grain_is_rrwebs_own_inactivity_threshold():
         ({"type": EventType.PageLoad, "timestamp": 0, "data": {}}, True),
         ({"type": EventType.PageVisible, "timestamp": 0, "data": {}}, True),
         ({"type": EventType.PageHidden, "timestamp": 0, "data": {}}, False),
+        ({"type": EventType.Identify, "timestamp": 0, "data": {"userId": "u"}}, False),
         ({"type": EventType.Meta, "timestamp": 0, "data": {}}, False),
         ({"type": EventType.FullSnapshot, "timestamp": 0, "data": {}}, False),
         (interaction(MouseInteractions.Click), True),
@@ -126,6 +128,7 @@ def test_the_sql_clause_selects_exactly_what_the_predicate_does():
         (Kind.MEDIA_INTERACTION, None, True),
         (Kind.PAGE_VISIBLE, None, True),
         (Kind.PAGE_HIDDEN, None, False),
+        (EVENTTYPE_NAMES[EventType.Identify], None, False),
         (Kind.MUTATION, None, False),
         (Kind.INPUT, None, True),
         (Kind.INPUT, '{"userTriggered": true}', True),

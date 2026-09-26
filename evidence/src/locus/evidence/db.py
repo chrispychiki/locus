@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS events (
     href         TEXT,             -- the link destination the target acts on: its own href, or the nearest enclosing anchor's
     title        TEXT,             -- the page title a PageLoad carries
     referrer     TEXT,             -- the referrer a PageLoad carries; empty string is a direct arrival
+    user_id      TEXT,             -- the operator's own id for the person, as an Identify event carries it, set on no other row; it names the visitor_id, so every recording of that visitor joins to it
     pointer_type TEXT,             -- mouse, touch or pen: what the interaction was made with
     extra        TEXT,             -- JSON: every other scalar the event and its target element carried, attributes included, values capped
     hidden       INTEGER,          -- 1 when the target sat outside the page's projection, 0 when it was projected content, NULL when no target resolved (project.js names the projection's limits)
@@ -154,10 +155,12 @@ SLICE_FACTS = (
 
 # Indexes over columns the widening below adds, created after it so a db from before the columns
 # existed gets them too: per-site slice reads scope on the snippet first and the open time second;
-# per-session reads over events group and join on the session stamp.
+# per-session reads over events group and join on the session stamp; a user id resolves to its
+# visitors off the few Identify rows, never a walk of the events table.
 WIDENED_INDEXES = (
     "CREATE INDEX IF NOT EXISTS slices_site ON slices(snippet, start_ts)",
     "CREATE INDEX IF NOT EXISTS events_session ON events(session_id)",
+    "CREATE INDEX IF NOT EXISTS events_user ON events(user_id, visitor_id) WHERE user_id IS NOT NULL",
 )
 
 _TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\);", re.DOTALL)

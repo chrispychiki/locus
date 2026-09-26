@@ -1,6 +1,14 @@
 """Sessions — the operator's definition applied to the recording and derived into the db."""
 
-from _support import click, full_snapshot, hidden, meta, stamped, text_mutation
+from _support import (
+    click,
+    full_snapshot,
+    hidden,
+    identify,
+    meta,
+    stamped,
+    text_mutation,
+)
 from locus.evidence.db import connect
 from locus.evidence.derive import run_distill
 from locus.evidence.hydrate import hydrate
@@ -184,6 +192,60 @@ def test_a_page_context_that_died_before_its_snapshot_is_a_page_load_and_a_prere
             "SELECT session_id FROM events WHERE visitor_id = 'ghost'"
         )
     )
+
+
+def test_an_identify_opens_no_session_extends_none_and_names_every_recording_of_its_visitor(
+    tmp_path,
+):
+    """An Identify is no act: one inside a session's trailing gap leaves its end where the last act put it, and one past the gap opens nothing. Its user id lands on its own row only, and reaches the visitor's other recordings through visitor_id — a page context before the login included."""
+    t0 = 1_700_000_000_000
+    earlier = stamped(
+        [meta(t0, href="https://x.com/"), full_snapshot(t0 + 1), page_load(t0 + 50)],
+        snippet="snip",
+    )
+    later_start = t0 + 3 * 60 * MIN
+    later = stamped(
+        [
+            meta(later_start, href="https://x.com/"),
+            full_snapshot(later_start + 1),
+            page_load(later_start + 50),
+            click(later_start + 15_000, 3),
+            identify(later_start + 20 * MIN, "user-42"),
+            identify(later_start + 2 * 60 * MIN, "user-42"),
+        ],
+        snippet="snip",
+    )
+    conn = _derived(tmp_path, {"v1": earlier + later})
+    sessions = _sessions(conn, "v1")
+    assert [(s["start_ts"], s["end_ts"]) for s in sessions] == [
+        (t0 + 50, t0 + 50),
+        (later_start + 50, later_start + 15_000),
+    ]
+    rows = conn.execute(
+        "SELECT timestamp, type_str, user_id, session_id FROM events "
+        "WHERE user_id IS NOT NULL ORDER BY timestamp"
+    ).fetchall()
+    assert [(r["type_str"], r["user_id"]) for r in rows] == [
+        ("Identify", "user-42"),
+        ("Identify", "user-42"),
+    ]
+    assert rows[0]["session_id"] == sessions[1]["id"], "inside the gap after the act"
+    assert rows[1]["session_id"] is None, "past the gap, no session reaches it"
+
+    joined = conn.execute(
+        "SELECT s.start_ts FROM sessions s WHERE s.visitor_id IN "
+        "(SELECT visitor_id FROM events WHERE user_id = ?) ORDER BY s.start_ts",
+        ("user-42",),
+    ).fetchall()
+    assert [r["start_ts"] for r in joined] == [s["start_ts"] for s in sessions]
+    plan = " ".join(
+        row["detail"]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT visitor_id FROM events WHERE user_id = ?",
+            ("user-42",),
+        )
+    )
+    assert "events_user" in plan, "a user id resolves off its own index"
 
 
 def test_a_head_with_a_page_load_counts_it_once(tmp_path):

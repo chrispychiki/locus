@@ -29,6 +29,7 @@ export const DISTILLED_COLUMNS = [
 	"href",
 	"title",
 	"referrer",
+	"user_id",
 	"pointer_type",
 	"extra",
 	"hidden",

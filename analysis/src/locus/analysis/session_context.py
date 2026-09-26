@@ -8,6 +8,7 @@ import sqlite3
 
 from locus.evidence.db import CANONICAL_ORDER
 from locus.evidence.kinds import Kind
+from locus.evidence.rrweb_constants import EventType
 from locus.evidence.text import describe_url
 
 INCOMPLETE = "recording there is incomplete"
@@ -28,9 +29,11 @@ def _duration(ms: int) -> str:
 
 
 def _head_event(conn: sqlite3.Connection, slice_id: int) -> sqlite3.Row | None:
+    """The slice's first page event, whose url attests the slice's page or leaves it unattested. An Identify is not a page event — it names a person, and one stamped before rrweb had a DOM to capture precedes the head — so it is passed over."""
     return conn.execute(
-        f"SELECT id, timestamp, counter, url FROM events WHERE slice_id = ? {CANONICAL_ORDER} LIMIT 1",
-        (slice_id,),
+        f"SELECT id, timestamp, counter, url FROM events WHERE slice_id = ? "
+        f"AND type != ? {CANONICAL_ORDER} LIMIT 1",
+        (slice_id, EventType.Identify),
     ).fetchone()
 
 
@@ -83,7 +86,7 @@ def window_pages(
     window_start: int | None = None,
     window_end: int | None = None,
 ) -> list[tuple[str | None, str, int | None]]:
-    """Ordered (url, kind, timestamp) page arrivals across the window's slices, in time order. A head arrival's timestamp is the slice's first event; an in-slice route's is its PageLoad's — the natural cut points when a window must split inside a slice, since a route boundary is where the page content just turned over wholesale.
+    """Ordered (url, kind, timestamp) page arrivals across the window's slices, in time order. A head arrival's timestamp is the slice's first page event (_head_event); an in-slice route's is its PageLoad's — the natural cut points when a window must split inside a slice, since a route boundary is where the page content just turned over wholesale.
 
     Each slice contributes its head arrival (arrival()), plus any in-slice route PageLoads: an SPA navigation fires a PageLoad in place rather than a checkout, so one slice can hold several pages. kind is 'page-load' for a real arrival, otherwise the head's boundary kind. A windowed split bounds the in-slice routes to [window_start, window_end); the slice head stays as the window's opening page context."""
     pages: list[tuple[str | None, str, int | None]] = []

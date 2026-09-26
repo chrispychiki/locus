@@ -619,12 +619,14 @@ def test_a_db_from_before_a_column_existed_is_widened_on_connect(tmp_path):
     conn = connect(db)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(slices)")}
     assert {"snippet", "url", "device", "screen_width", "script_version"} <= columns
-    assert "session_id" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    assert {"session_id", "user_id"} <= {
+        row[1] for row in conn.execute("PRAGMA table_info(events)")
+    }
     indexes = {
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
     }
-    assert {"slices_site", "events_session"} <= indexes
+    assert {"slices_site", "events_session", "events_user"} <= indexes
     stored = {
         row[0]: row[1]
         for row in conn.execute(
@@ -667,7 +669,7 @@ def test_a_column_the_widening_cannot_add_is_refused_by_name(tmp_path, monkeypat
         "CREATE TABLE events (id INTEGER PRIMARY KEY, visitor_id TEXT NOT NULL, "
         "timestamp INTEGER NOT NULL, type INTEGER NOT NULL, counter TEXT, "
         "raw_json BLOB NOT NULL, content_hash TEXT NOT NULL, slice_id INTEGER, "
-        "type_str TEXT, snippet TEXT, session_id INTEGER)"
+        "type_str TEXT, snippet TEXT, session_id INTEGER, user_id TEXT)"
     )
     old.close()
     monkeypatch.setattr(
