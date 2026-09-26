@@ -252,8 +252,11 @@ LANDING_MS = 30_000
 CHROME_ARGS = [
     # No window at start: a used profile would otherwise come up restoring its last
     # session as placeholder tabs that never load until shown, and a connect that
-    # attaches to them waits on them forever. The first `open` makes the first window.
-    "--no-startup-window",
+    # attaches to them waits on them forever; a startup window would also take the
+    # screen from whatever the operator has up. The first `open` makes the first window.
+    # --silent-launch, not --no-startup-window: the latter holds the browser alive
+    # against the operator's own Quit, so a window left behind could only be killed.
+    "--silent-launch",
     "--use-mock-keychain",
     "--password-store=basic",
     "--no-first-run",
@@ -499,7 +502,23 @@ class Driver:
         self._save_table()
         return wid
 
+    def _let_go_if_ended(self) -> None:
+        """A browser ended under the daemon — the operator quit it, or it crashed — took every window with it. The daemon learns that only by asking the browser, since nothing it holds updates between commands; a browser that no longer answers is let go of, window table and all, so the command meets no browser rather than its dead windows."""
+        from playwright.sync_api import Error as PlaywrightError
+
+        if self.ctx is None:
+            return
+        try:
+            self.session.send("Browser.getVersion")
+        except PlaywrightError:
+            self.browser = self.ctx = self.session = None
+            self.windows.clear()
+            self.targets.clear()
+            self.dialog_mode.clear()
+            self._table_path().unlink(missing_ok=True)
+
     def _ensure(self) -> None:
+        self._let_go_if_ended()
         if self.ctx is not None:
             return
         self.browser, self.headless, fresh = Browser(self._pw, self.home).connect(
@@ -968,6 +987,7 @@ class Driver:
 
     def idle(self) -> bool:
         """No window anywhere, judged on the browser's real windows after connecting to a running one. No browser running is idle too, and nothing is started to find that out."""
+        self._let_go_if_ended()
         if self.ctx is None and Browser(self._pw, self.home)._alive() is None:
             return True
         self._ensure()

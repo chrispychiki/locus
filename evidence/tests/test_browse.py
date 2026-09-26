@@ -639,6 +639,43 @@ def test_an_unknown_verb_on_a_fresh_daemon_leaves_the_browsers_windows_alone(
         os.environ.pop("LOCUS_BROWSE_HEADLESS", None)
 
 
+def test_a_browser_ended_under_the_daemon_leaves_no_dead_windows_behind(
+    tmp_path_factory, pages
+):
+    # The operator quitting the browser by hand ends it, and every window with it, while
+    # the daemon still holds them. The next command answers from what is actually there —
+    # no windows — and an open after it starts a clean browser.
+    import json
+    import urllib.request
+
+    home = tmp_path_factory.mktemp("ended-under") / "browse"
+    os.environ["LOCUS_BROWSE_HEADLESS"] = "1"
+    try:
+        code, out, err = browse(home, ["open", str(pages / "demo.html")])
+        assert code == 0, err
+        endpoint = json.loads((home / "browser.json").read_text())["endpoint"]
+        os.kill(_browser_pid(home), 15)
+
+        def answering() -> bool:
+            try:
+                urllib.request.urlopen(endpoint + "/json/version", timeout=1)
+                return True
+            except OSError:
+                return False
+
+        assert _settles(lambda: not answering()), "the browser ended"
+
+        code, out, err = browse(home, ["status"])
+        assert code == 0, err
+        assert "no windows" in out
+        code, out, err = browse(home, ["open", str(pages / "demo.html")])
+        assert code == 0, err
+        assert win_of(out) == "w1"
+    finally:
+        browse(home, ["quit"])
+        os.environ.pop("LOCUS_BROWSE_HEADLESS", None)
+
+
 def test_quit_with_no_daemon_still_closes_a_browser_left_running(
     tmp_path_factory, pages
 ):
