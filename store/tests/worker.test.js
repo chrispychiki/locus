@@ -335,6 +335,7 @@ describe("worker", () => {
 					"1",
 					"written",
 					"",
+					"0",
 				]),
 				doubles: [1749600000000],
 			},
@@ -372,11 +373,36 @@ describe("worker", () => {
 					"1",
 					"written",
 					"detectPluginsLengthInconsistency",
+					"0",
 				],
 				["", "UA/1", ""],
 			),
 		);
 		expect(env.points[0].blobs[10]).toBe("detectPluginsLengthInconsistency");
+	});
+
+	test('a birth stamped internal lands "1" at blob12; a bundle that does not send it lands "0"', async () => {
+		const env = fakeEnv();
+		const birth = (extra) =>
+			worker.fetch(
+				new Request(`https://store.test/telemetry/${SNIPPET}/${VISITOR}`, {
+					method: "POST",
+					body: JSON.stringify({
+						metric: "slice_started",
+						sliceId: SLICE,
+						recorderVersion: "locus-recorder/0.6.0",
+						url: "https://site/p",
+						first_slice: true,
+						visitor_source: "written",
+						...extra,
+					}),
+				}),
+				env,
+			);
+		expect((await birth({ internal: true })).status).toBe(204);
+		expect((await birth({ internal: false })).status).toBe(204);
+		expect((await birth({})).status).toBe(204);
+		expect(env.points.map((p) => p.blobs[11])).toEqual(["1", "0", "0"]);
 	});
 
 	test("a transport_probe — the recorder's channel-assessment shot — lands, on a response whose Timing-Allow-Origin lets the sender read the shot's fate", async () => {
@@ -438,6 +464,7 @@ describe("worker", () => {
 				"1",
 				"",
 				"",
+				"0",
 			]),
 		);
 	});
@@ -477,6 +504,13 @@ describe("worker", () => {
 				first_slice: true,
 				visitor_source: 7,
 			}, // visitor source wrong type
+			{
+				metric: "slice_started",
+				sliceId: SLICE,
+				url: "https://site/p",
+				first_slice: true,
+				internal: "1",
+			}, // internal wrong type
 			{ metric: "transport_probe", sliceId: "not-a-slice" }, // malformed slice id
 			{ metric: "transport_probe", sliceId: SLICE, ts: "12" }, // wrong-typed ts
 			{
@@ -540,6 +574,7 @@ describe("worker", () => {
 			"shape:slice_started",
 			"shape:cost_sample",
 			"shape:recorder_fault",
+			"shape:slice_started",
 			"shape:slice_started",
 			"shape:slice_started",
 			"shape:transport_probe",

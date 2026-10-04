@@ -11,6 +11,8 @@
  * Synthetic events, because no rrweb event holds a page's arrival context — its union has no visibility type, and its Load/DomContentLoaded events carry no data at all, no url/title/referrer (rrweb packages/types/src/index.ts):
  * PageLoad marks an arrival, carrying url/title/referrer. It fires on the page's first FullSnapshot — inside that snapshot's slice, right behind the covering snapshot — and again on every SPA route change, which rrweb itself leaves invisible. A route whose masking differs restarts capture, so its PageLoad rides the restart's first snapshot; any other route emits it in place. spaRoute is set either way.
  * PageVisible/PageHidden fire on visibility transitions and carry url/referrer. document.referrer is fixed when the Document is created and constant for its lifetime (https://html.spec.whatwg.org/multipage/dom.html#dom-document-referrer), so a page that bounces before rrweb has a DOM to capture still testifies its arrival facts through the hidden marker, which the context's head slice carries. hidden is the last moment a page can reliably observe — unload and pagehide do not fire in many mobile teardowns (https://developer.chrome.com/docs/web-platform/page-lifecycle-api) — so a fire-and-forget shot on the transport carrier (sink.js) carries the hidden marker and nothing else; IndexedDB is the durability, and the next page context drains it. Nothing else rides the shot: a page that dies before its first drain holds a landing page and no acts, and shipping its snapshot would cost a write and stored bytes per bounce, a gzip on the main thread at teardown, and the beacon budget the marker needs.
+ *
+ * Identify attaches the operator's own user id to the recording (identify.js): once at start() when the deployment passes one, and again on each identify() call — a login inside a single-page app, say. It rides the event stream in the current slice like any other event, and never the telemetry channel, which nothing masks.
  */
 
 import { load as loadBotd } from "@fingerprintjs/botd";
@@ -22,6 +24,7 @@ import { buildChunks, collectEnvelope } from "./chunk.js";
 import { COST_PING_INTERVAL_MS, costMeter, sampleBacklog } from "./cost.js";
 import { isLocalEnvironment } from "./environment.js";
 import { describeError } from "./errors.js";
+import { assertUserId } from "./identify.js";
 import { maskingPosture, optionsForUrl } from "./masking.js";
 import { watchRoutes } from "./route.js";
 import { EventType } from "./rrweb_constants.js";
@@ -29,7 +32,7 @@ import { faultPing, gatedPing } from "./sink.js";
 import { EventStream, makeSliceId } from "./stream.js";
 import { describeRecords, Uploader } from "./uploader.js";
 import { RECORDER_VERSION } from "./version.js";
-import { getVisitorIdentity } from "./visitor.js";
+import { getVisitorIdentity, isInternalTraffic } from "./visitor.js";
 
 export { isLocalEnvironment } from "./environment.js";
 export { describeError } from "./errors.js";
@@ -99,6 +102,7 @@ export async function detectBot() {
  * @param {Array<{pattern:string,options:object}>} [config.rrwebRules]  ordered per-URL rrweb options, resolved at each record() and re-resolved on route change; a changed result stops/restarts rrweb (new slice), an unchanged one keeps the in-place PageLoad. Omit for the credential-mask-only default. recordDOM, the event sink, and the credential mask (masking.js) are locked (a rule may add masking, never take credential masking away — a rule's own maskInputFn still runs, beneath the credential check; a rule's maskAllInputs masks every input, `select` included unless its maskInputOptions says `select: false`); the snapshot cadence (checkoutEveryNms below) is a default any rule can override
  * @param {string} [config.visitorId]             override the cookie identity; honored verbatim, never reformatted or rejected, so a deployment supplying its own id owns keeping it inside its store's visitor charset
  * @param {string} [config.visitorSource]         how that supplied id was come by; rides every birth. Absent, births carry "undeclared"
+ * @param {string} [config.userId]                the operator's own id for the person on this page, attached to the visitor as an Identify event (identify.js) — the cookie stays the recording's key. null or absent is no one identified; any other value is validated before anything else runs, and a bad one throws
  * @param {boolean} [config.recordLocalEnvironment=false]
  * @param {boolean} [config.botDetection=true]    BotD gate
  * @param {{isBot:boolean, detail:string}} [config.botVerdict]  a verdict the deployment already took from detectBot() ahead of start(); honored as the gate's own, so BotD runs once, and its exempted detector rides the births
@@ -108,10 +112,11 @@ export async function detectBot() {
  * @param {number} [config.errorThreshold=5]      self-termination bound
  * @param {number} [config.maxGzippedChunkBytes]  per-chunk gzipped cap; match the store's
  * @param {number} [config.maxBacklogBytes]       on-device buffer ceiling (default: MAX_BACKLOG_BYTES in buffer.js), at which the buffer evicts its oldest undelivered records to admit new capture
- * @returns {Promise<{stop, flush} | null>}       null when gated off
+ * @returns {Promise<{stop, flush, identify} | null>}  null when gated off. identify(userId) records an Identify for a person identified after start — a login inside a single-page app — and throws on a bad value as start() does
  */
 export async function start(config) {
 	if (!config?.sink) throw new Error("locus-recorder: a sink is required");
+	if (config.userId != null) assertUserId(config.userId);
 
 	// A prerendered page runs this script before any human sees it (Chromium speculation-rules and
 	// omnibox prerendering: https://wicg.github.io/nav-speculation/prerendering.html), so recording
@@ -143,7 +148,10 @@ export async function start(config) {
 	const recorderVersion = RECORDER_VERSION;
 	// The capture-moment device facts, collected once: every envelope field is constant for the
 	// page context's life, and this one reading serves everything the context stamps or ships.
-	const envelope = collectEnvelope();
+	// The internal-traffic mark rides beside them: a fact about the capture, stamped at capture,
+	// so a backlog shipped later by another context still says what it was (visitor.js).
+	const internal = isInternalTraffic();
+	const envelope = { ...collectEnvelope(), internal };
 
 	// The bot gate attests itself: BotD's verdict is per page context and knowable no other way, and
 	// the recorded corpus is definitionally only what passed, so without this ping "how much of my
@@ -184,6 +192,8 @@ export async function start(config) {
 			// birth distinguishes it.
 			visitor_source: identity.source,
 			gate_exempt: gateExempt,
+			// The birth carries the mark for the rates plane, where it joins by visitor like the source.
+			internal,
 		});
 		firstSlice = false;
 	};
@@ -371,6 +381,15 @@ export async function start(config) {
 		});
 	};
 
+	const identify = (userId) => {
+		assertUserId(userId);
+		record({
+			type: EventType.Identify,
+			data: { userId },
+			timestamp: Date.now(),
+		});
+	};
+
 	// The error strings go out as a copy, never drained: the uploader reports back
 	// (onErrorsDelivered) once the chunk carrying them lands, and only then are they removed.
 	// Snapshotting opens a fresh trim count — the drain is single-flight, so exactly one
@@ -525,6 +544,7 @@ export async function start(config) {
 	};
 
 	startCapture(window.location.href);
+	if (config.userId != null) identify(config.userId);
 
 	document.addEventListener("visibilitychange", onVisibilityChange);
 	window.addEventListener("pagehide", onTeardown);
@@ -568,5 +588,5 @@ export async function start(config) {
 		? setInterval(emitCostIfActive, COST_PING_INTERVAL_MS)
 		: null;
 
-	return { stop: terminate, flush: () => uploader.flush() };
+	return { stop: terminate, flush: () => uploader.flush(), identify };
 }

@@ -1353,9 +1353,9 @@ def test_ae_names_positions_from_the_layout(tmp_path, capsys, monkeypatch):
                     "blob2": "v1",
                     "blob8": "https://a/",
                     "blob9": "1",
-                    "blob12": "",
+                    "blob999": "",
                     "double1": 5,
-                    "double3": 0,
+                    "double999": 0,
                     "n": "2",
                 },
                 {
@@ -1391,9 +1391,9 @@ def test_ae_names_positions_from_the_layout(tmp_path, capsys, monkeypatch):
         "visitor": "v1",
         "url": "https://a/",
         "first_slice": "1",
-        "blob12": "",
+        "blob999": "",
         "slice_open_ms": 5,
-        "double3": 0,
+        "double999": 0,
         "n": "2",
     }, "uniform and per-metric positions named; undeclared ones and aliases untouched"
     assert rows[1] == {

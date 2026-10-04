@@ -153,6 +153,7 @@ const isBoolean = (v) => typeof v === "boolean";
 const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
 const isSliceId = (v) => isString(v) && SLICE_ID_SHAPE.test(v);
 const isStringOrAbsent = (v) => v === undefined || v === null || isString(v);
+const isBooleanOrAbsent = (v) => v === undefined || v === null || isBoolean(v);
 
 // AE doubles are positional numbers with no null, so an unmeasured figure encodes as this
 // sentinel. The recorder sends null for a heap reading on any non-Chromium engine, and for a
@@ -216,7 +217,8 @@ export function telemetryPoint(ping, visitorId) {
 			!isString(ping.url) ||
 			!isBoolean(ping.first_slice) ||
 			!isStringOrAbsent(ping.visitor_source) ||
-			!isStringOrAbsent(ping.gate_exempt)
+			!isStringOrAbsent(ping.gate_exempt) ||
+			!isBooleanOrAbsent(ping.internal)
 		)
 			return null;
 		// The slice-start ms (the slice id's leading segment) rides as a double so reads can
@@ -227,7 +229,10 @@ export function telemetryPoint(ping, visitorId) {
 		//
 		// The visitor source says how the recorder came by this visitor's id. gate_exempt names
 		// the BotD detector the bot gate exempted on this page context; empty on a clean verdict,
-		// an ungated context, or a bundle that does not send it.
+		// an ungated context, or a bundle that does not send it. internal is the recorder's read of
+		// the internal-traffic cookie — a visit the deployment's own tooling drove — stamped on the
+		// birth because it is a fact about the visitor, joined from here like visitor_source; a
+		// bundle that does not send it is a visitor.
 		return declaredPoint(
 			metric,
 			visitorId,
@@ -238,6 +243,7 @@ export function telemetryPoint(ping, visitorId) {
 				first_slice: ping.first_slice ? "1" : "0",
 				visitor_source: ping.visitor_source ?? "",
 				gate_exempt: ping.gate_exempt ?? "",
+				internal: ping.internal ? "1" : "0",
 			},
 			{ slice_open_ms: Number(ping.sliceId.split("-")[0]) },
 		);

@@ -1,8 +1,8 @@
 /**
  * The refusal branches of the script-tag entry — the identification contract. A capture proving the
  * bundle was not loaded as its own classic <script src> tag fails loud and starts nothing; a tag
- * without a valid id sets the loaded marker and refuses to start. The happy path through start() is
- * the recorder↔store integration suite's and the drive check's.
+ * without a valid id sets the loaded marker, carrying only identify, and refuses to start. The happy
+ * path through start() is the recorder↔store integration suite's and the drive check's.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 
@@ -63,7 +63,7 @@ describe("autostart tag binding", () => {
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toContain("?id=");
 		expect(errors[0]).toContain("Not starting");
-		expect(globalThis.window.LocusRecorder).toEqual({});
+		expect(Object.keys(globalThis.window.LocusRecorder)).toEqual(["identify"]);
 	});
 
 	test("an invalid id is refused whatever the tag's filename or origin — identification is not a name match", async () => {
@@ -72,7 +72,7 @@ describe("autostart tag binding", () => {
 		});
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toContain("snippet id");
-		expect(globalThis.window.LocusRecorder).toEqual({});
+		expect(Object.keys(globalThis.window.LocusRecorder)).toEqual(["identify"]);
 	});
 
 	test("a second tag on the page stays quiet and changes nothing — one page, one recording", async () => {
@@ -93,7 +93,7 @@ describe("autostart tag binding", () => {
 		});
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toContain("failed to start");
-		expect(globalThis.window.LocusRecorder).toEqual({});
+		expect(Object.keys(globalThis.window.LocusRecorder)).toEqual(["identify"]);
 		// The page context is otherwise invisible on both planes, so the fault must reach the tag's
 		// own store — and nothing else: the one shot the failure path fires.
 		expect(fetchTargets).toHaveLength(1);

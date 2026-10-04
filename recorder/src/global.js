@@ -25,11 +25,22 @@
  * start()'s jsdoc (index.js) is the option surface, and masking.js declares what a masking pattern
  * matches. Nothing here ships configured: the untouched facade records verbatim except credentials (masking.js declares the always-masked set).
  *
- * Once the facade runs it sets `window.LocusRecorder`. Its presence means the bundle loaded and
- * ran, whether or not this page context is recorded; it carries `flush()` only while recording. flush
- * drains the buffer to empty at once — batch after batch until nothing deliverable remains, a
- * delivery failure ending it early into the error accounting rather than thrown into the page.
+ * To link recordings to your own user ids, pass `userId` on the start() call below, read from
+ * wherever this page already holds the logged-in user; a person identified by the site's own code
+ * — an auth check resolving, a login inside a single-page app — goes through
+ * `window.LocusRecorder.identify(id)`. Either records an Identify event beside the visitor's
+ * recording (identify.js); the cookie stays the key.
+ *
+ * Once the facade claims the tag it sets `window.LocusRecorder`. Its presence means the bundle
+ * loaded and ran, whether or not this page context is recorded. It carries `identify()` from that
+ * moment, so site code calls it whenever it learns who is logged in: an id given before recording
+ * starts is held and recorded once it does, the latest one winning, and on a page context that
+ * never records it is dropped. identify throws on a bad id, into the caller, either way. `flush()`
+ * appears only once recording: it drains the buffer to empty at once — batch after batch until
+ * nothing deliverable remains, a delivery failure ending it early into the error accounting rather
+ * than thrown into the page.
  */
+import { assertUserId } from "./identify.js";
 import {
 	faultPing,
 	getVisitorIdentity,
@@ -59,7 +70,36 @@ export async function autostart(tag) {
 		);
 		return;
 	}
-	window.LocusRecorder = {};
+	// The marker carries identify from the claim on: site code learns who is logged in on its own
+	// clock, and an app's auth check can resolve before start() does. Until start() settles, the
+	// latest id is held; a page context that records receives it then, and one that never records —
+	// refused, gated, or failed on the way up — drops it and every id after. Each call is checked
+	// whichever way it goes, so a bad id throws into the caller either way.
+	let held = null;
+	let deliver = (userId) => {
+		held = userId;
+	};
+	const marker = {
+		identify: (userId) => {
+			assertUserId(userId);
+			deliver(userId);
+		},
+	};
+	window.LocusRecorder = marker;
+	const instance = await begin(tag);
+	if (!instance) {
+		deliver = () => {};
+		held = null;
+		return;
+	}
+	marker.flush = instance.flush;
+	deliver = instance.identify;
+	if (held !== null) instance.identify(held);
+	held = null;
+}
+
+/** Everything after the claim: the tag's id read and checked, the store's channels wired, and start(). The recording instance, or nothing when this page context will not record — a rollout gate written here returns before start(). */
+async function begin(tag) {
 	const url = new URL(tag.src);
 	const id = url.searchParams.get("id");
 	if (id === null) {
@@ -68,14 +108,14 @@ export async function autostart(tag) {
 				"segment of every store key, so without it nothing can be captured. Paste the tag " +
 				"with its id intact. Not starting.",
 		);
-		return;
+		return null;
 	}
 	if (!isValidSnippetId(id)) {
 		console.error(
 			`locus-recorder: snippet id ${JSON.stringify(id)} does not match ${SNIPPET_ID_PATTERN} — ` +
 				"the store rejects every upload under it, capturing nothing. Not starting.",
 		);
-		return;
+		return null;
 	}
 	// storeSink closes the store's URL contract over this tag's origin and id, and shares one
 	// carrier between the telemetry pings and the chunk sink's hidden-marker shots — the
@@ -88,13 +128,12 @@ export async function autostart(tag) {
 		// say so.
 		const identity = getVisitorIdentity();
 		visitorId = identity.id;
-		const instance = await start({
+		return await start({
 			visitorId,
 			visitorSource: identity.source,
 			telemetry,
 			sink,
 		});
-		if (instance) window.LocusRecorder = { flush: instance.flush };
 	} catch (error) {
 		// A page context that loaded the bundle, passed every gate, and then died on the way up is
 		// invisible on both planes — no birth, no chunk, no error — and indistinguishable from a
@@ -104,6 +143,7 @@ export async function autostart(tag) {
 		// named.
 		console.error("locus-recorder: failed to start —", error);
 		telemetry.emit(faultPing("start_failed", error, { visitorId }));
+		return null;
 	}
 }
 

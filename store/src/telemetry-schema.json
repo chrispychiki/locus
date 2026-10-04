@@ -13,6 +13,7 @@
 	},
 	"blob_domains": {
 		"first_slice": "\"1\" | \"0\"",
+		"internal": "\"1\" | \"0\" — \"1\" when the page carried the internal-traffic cookie (recorder/src/visitor.js): a visit driven by the deployment's own tooling, not a visitor",
 		"spa_route": "\"1\" | \"0\"",
 		"sniff": "bodySniff's non-gzip names (store/src/keys.js)"
 	},
@@ -24,7 +25,8 @@
 				"8": "url",
 				"9": "first_slice",
 				"10": "visitor_source",
-				"11": "gate_exempt"
+				"11": "gate_exempt",
+				"12": "internal"
 			},
 			"doubles": { "1": "slice_open_ms" }
 		},

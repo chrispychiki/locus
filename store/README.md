@@ -2,7 +2,7 @@
 
 The Locus recorder's recommended deployment: one Cloudflare Worker in front of one R2 bucket. Chunk uploads and recorder telemetry go to the worker; the recorder bundle is served straight from the worker's static-asset binding, which never runs worker code; `locus` reads the bucket directly with its own credentials. The bucket is never publicly readable.
 
-At low-to-moderate volume the whole thing runs inside Cloudflare's free tier. Which limit binds first depends on the traffic's shape — the projection arithmetic is the quantify skill's — and a static-asset serve is a free, unlimited request class (https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/), so bundle serving never meters.
+At low-to-moderate volume the whole thing runs inside Cloudflare's free tier. Which limit binds first depends on the traffic's shape — for the projection arithmetic, read the quantify skill — and a static-asset serve is a free, unlimited request class (https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/), so bundle serving never meters.
 
 ## Deploy
 
@@ -39,19 +39,19 @@ One tag per site; `recorder/README.md` carries it. Its origin is the worker URL 
 
 Capture configuration — masking, drain cadence, a rollout gate — is `recorder/src/global.js`, the facade this deploy builds into the bundle it serves. Edit it and redeploy; the bundle is served `Cache-Control: no-cache` (`public/_headers`), so every page load revalidates it against the edge and a change binds on the next page load instead of waiting out anyone's cache — an unchanged bundle costs a 304, never a re-download. The served bytes still converge within a few minutes of a deploy: a stale read right after one is the asset deploy propagating across the edge, not an HTTP cache — and not a failed deploy. Masking is record-time only: nothing downstream recovers what wasn't captured, or un-captures what was. A bundle that wires no telemetry sink emits no observability datapoints. Visitor identity is the facade's to mint — the store keys chunks by whatever it supplies (`src/keys.js` gates the shape). To send uploads somewhere other than this worker, replace the chunk sink: import the recorder package into your own bundle — `recorder/README.md` carries that surface.
 
-With the tag on the page, `window.LocusRecorder` means the bundle loaded and ran. It carries `flush()` only while recording — a local hostname, a detected bot, or a rollout gate leaves the marker bare — and awaiting `flush()` delivers everything captured so far, so a capture check need not wait on the drain timer.
+With the tag on the page, `window.LocusRecorder` means the bundle loaded and ran. It carries `identify()` from the start (`recorder/README.md`), and `flush()` only while recording — a local hostname, a detected bot, or a rollout gate leaves it absent — and awaiting `flush()` delivers everything captured so far, so a capture check need not wait on the drain timer.
 
 ## Reading it back
 
 `locus ls` inventories the bucket and diffs it against what is already loaded; `locus load <prefix>` loads the chunks under a key prefix into a local `events.db`, hydrating them, materializing slices, and distilling as it goes. Both self-serve the bucket name, endpoint, and S3 credentials from `store/.env` and `wrangler.toml`, so nothing is exported by hand.
 
-Whether it is recording, whether capture is complete, what it costs, whether it is leaking PII, what it does to visitors' devices — those are judgments across both planes, the objects in R2 and the Analytics Engine datapoints. The quantify skill owns them.
+Whether it is recording, whether capture is complete, what it costs, whether it is leaking PII, what it does to visitors' devices — those are judgments across both planes, the objects in R2 and the Analytics Engine datapoints — which Analytics Engine samples at volume, so a count read from them is an estimate. Read the quantify skill for them.
 
 ## Key layout and access
 
 `src/keys.js` declares the key an upload path becomes, and the shape gate the path must pass — a chunk body's only gate is the size cap, and why its bytes are deliberately never one is that file's own preamble; `src/telemetry.js` declares the gate for telemetry bodies, and `src/telemetry-schema.json` declares the layout of every observability datapoint — the worker writes rows by it, and `locus ae` reads it back. `locus ls` reads those keys back positionally, so moving the layout is a change on both sides of the store.
 
-The ingest endpoint is open-write, defended by shape not auth — there is no upload secret to lean on. What bounds abuse: every body is capped (`src/keys.js`), junk that passes the shape gate never reaches an analysis — hydration rejects bodies without the recorder's stamps at decode and dedups duplicates away — and everything stored expires at the retention horizon, so a flood's storage cost is bounded in time. What a flood does to the bill is the same plan arithmetic as legitimate traffic — which meter binds first, and where the free tier stops serving instead of charging, is the quantify skill's projection.
+The ingest endpoint is open-write, defended by shape not auth — there is no upload secret to lean on. What bounds abuse: every body is capped (`src/keys.js`), junk that passes the shape gate never reaches an analysis — hydration rejects bodies without the recorder's stamps at decode and dedups duplicates away — and everything stored expires at the retention horizon, so a flood's storage cost is bounded in time. What a flood does to the bill is the same plan arithmetic as legitimate traffic — for which meter binds first, and where the free tier stops serving instead of charging, read the quantify skill's projection.
 
 **The snippet id is an organizational prefix, not a security boundary.** R2 API tokens scope to a whole bucket — there is no prefix-level grant (https://developers.cloudflare.com/r2/api/tokens/) — so any credential that reads the bucket reads every snippet in it. One bucket is one trust domain: sites that must not share read access go in separate buckets, not just separate snippet ids.
 

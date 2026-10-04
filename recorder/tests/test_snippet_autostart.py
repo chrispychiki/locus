@@ -1,4 +1,4 @@
-"""The shipped script-tag artifact — dist/locus-recorder.min.js, the canonical one-tag install — executed in a real Chromium. The tag's designed execution signal is `window.LocusRecorder`: the bundle binds to its own tag via document.currentScript, so identification is certain and the global is planted whenever the bundle runs as a script tag — its presence discriminates "loaded and ran" from "not loaded as a tag at all". A malformed id refuses loudly on the console while the claim stands, and a tag with no ?id= refuses loudly too, naming the missing param. Capture is deliberately NOT asserted, and the recorder's gates are not defeated: this harness serves from 127.0.0.1, so the local-environment gate suppresses recording — production-correct behavior for an automated local page, leaving the global present but empty. Capture correctness is owned by the recorder↔evidence contract suite (test_recorder_integration.py beside this file) and the store roundtrip."""
+"""The shipped script-tag artifact — dist/locus-recorder.min.js, the canonical one-tag install — executed in a real Chromium. The tag's designed execution signal is `window.LocusRecorder`: the bundle binds to its own tag via document.currentScript, so identification is certain and the global is planted whenever the bundle runs as a script tag — its presence discriminates "loaded and ran" from "not loaded as a tag at all". A malformed id refuses loudly on the console while the claim stands, and a tag with no ?id= refuses loudly too, naming the missing param. Capture is deliberately NOT asserted, and the recorder's gates are not defeated: this harness serves from 127.0.0.1, so the local-environment gate suppresses recording — production-correct behavior for an automated local page, leaving the global present and carrying only identify. Capture correctness is owned by the recorder↔evidence contract suite (test_recorder_integration.py beside this file) and the store roundtrip."""
 
 import pytest
 from _harness import chromium_page, serve_dir
@@ -61,8 +61,8 @@ def test_valid_id_claims_the_tag_and_gates_capture(page, site):
     state = page.evaluate(
         "() => ({ keys: Object.keys(window.LocusRecorder),         errors: window.__errors })"
     )
-    assert state["keys"] == [], (
-        "gated off, the global carries no flush — present but empty"
+    assert state["keys"] == ["identify"], (
+        "gated off, the global carries identify and no flush"
     )
     assert state["errors"] == []
     assert uploads == []
@@ -90,7 +90,7 @@ def test_malformed_id_refuses_loudly_without_starting(page, site):
         "         errors: window.__errors })"
     )
     assert state["claimed"], "the tag is claimed before the id is judged"
-    assert state["keys"] == []
+    assert state["keys"] == ["identify"]
     assert state["errors"] == [], "the refusal is a console error, not a throw"
     assert uploads == []
 
@@ -110,5 +110,5 @@ def test_tag_without_id_claims_the_tag_and_refuses_loudly(page, site):
     assert state["claimed"], (
         "currentScript identifies the tag with certainty — id or not, the bundle loaded and ran"
     )
-    assert state["keys"] == []
+    assert state["keys"] == ["identify"]
     assert state["errors"] == [], "the refusal is a console error, not a throw"

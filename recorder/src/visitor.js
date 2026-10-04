@@ -7,6 +7,11 @@
 const COOKIE = "locusVisitorId";
 const VALID_VISITOR_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
+/**
+ * The internal-traffic mark: a visit the deployment's own tooling drove — `locus browse` sets this cookie on every document it opens — rather than a visitor's. The recorder records it like any other (a capture check needs the recording) and stamps `internal` on the chunk envelope and the birth ping, so every count downstream can leave it out. Any value counts; absence is a visitor. The jar is externally writable, so a page can opt itself out of the operator's counts — nothing is gained by doing so, and a bot that does is excluded, which is the right outcome.
+ */
+export const INTERNAL_COOKIE = "locusInternal";
+
 /** The visitor a fault belongs to when the identity itself is what failed: reading the cookie throws on an opaque origin, and a sandboxed iframe has no cookie jar at all. The sentinel satisfies the store's key charset — a report of the failure that fails the gate is the failure going unreported — and is not an id any visitor can hold. */
 export const UNIDENTIFIED_VISITOR = "unidentified";
 
@@ -59,4 +64,13 @@ export function getVisitorIdentity() {
 
 export function getOrCreateVisitorId() {
 	return getVisitorIdentity().id;
+}
+
+/** Whether this page carries the internal-traffic mark. A jar that cannot be read (an opaque origin) is a visitor's. */
+export function isInternalTraffic() {
+	try {
+		return getCookie(INTERNAL_COOKIE) !== null;
+	} catch {
+		return false;
+	}
 }

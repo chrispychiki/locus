@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { getOrCreateVisitorId, getVisitorIdentity } from "../src/visitor.js";
+import {
+	getOrCreateVisitorId,
+	getVisitorIdentity,
+	isInternalTraffic,
+} from "../src/visitor.js";
 
 let jar;
 beforeEach(() => {
@@ -134,5 +138,28 @@ describe("getVisitorIdentity", () => {
 			},
 		};
 		expect(getVisitorIdentity().source).toBe("unpersisted");
+	});
+});
+
+describe("isInternalTraffic", () => {
+	test("a jar without the mark is a visitor", () => {
+		jar = "locusVisitorId=Stable_Visitor-01";
+		expect(isInternalTraffic()).toBe(false);
+	});
+
+	test("the mark beside the visitor cookie, any value, is internal", () => {
+		jar = "locusVisitorId=Stable_Visitor-01; locusInternal=1";
+		expect(isInternalTraffic()).toBe(true);
+		jar = "locusInternal=";
+		expect(isInternalTraffic()).toBe(true);
+	});
+
+	test("a jar that throws on read is a visitor", () => {
+		globalThis.document = {
+			get cookie() {
+				throw new DOMException("opaque origin", "SecurityError");
+			},
+		};
+		expect(isInternalTraffic()).toBe(false);
 	});
 });

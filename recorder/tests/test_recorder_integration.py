@@ -200,6 +200,48 @@ def test_capture_then_evidence_round_trip(page, site, tmp_path):
     assert arrival(conn, row["id"]) == ("page-load", page_b, f"{site}/page_a.html")
 
 
+def test_a_user_id_rides_in_band_and_lands_on_its_own_row(page, site, tmp_path):
+    page.goto(f"{site}/page_b.html")
+    assert start_recorder(page, userId="user-42")
+    page.click("#buy")
+    page.evaluate("() => window.__recorder.identify('user-43')")
+    payloads = [decode(chunk) for chunk in page.evaluate(FLUSH_JS)]
+
+    events = [event for _, event in stream_of(payloads)]
+    assert [e["type"] for e in events[:4]] == [
+        EventType.Meta,
+        EventType.FullSnapshot,
+        EventType.PageLoad,
+        EventType.Identify,
+    ], "on a ready document, the start-time Identify follows the arrival"
+    identified = [e["data"] for e in events if e["type"] == EventType.Identify]
+    assert identified == [{"userId": "user-42"}, {"userId": "user-43"}]
+
+    visitor = payloads[0]["visitorId"]
+    conn = connect(tmp_path / "events.db")
+    for payload in payloads:
+        for event in payload["events"]:
+            event["_envelope"] = {"recorder_slice": payload["sliceId"]}
+        hydrate(conn, visitor, payload["events"])
+    materialize_slices(conn, visitor)
+    subprocess.run(
+        ["bun", str(DISTILL), str(tmp_path / "events.db")],
+        check=True,
+        capture_output=True,
+    )
+    rows = conn.execute(
+        "SELECT visitor_id, type_str, user_id FROM events "
+        "WHERE user_id IS NOT NULL ORDER BY timestamp, counter"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        (visitor, "Identify", "user-42"),
+        (visitor, "Identify", "user-43"),
+    ]
+    row = conn.execute("SELECT id, status FROM slices").fetchone()
+    assert row["status"] == "replayable"
+    assert arrival(conn, row["id"])[:2] == ("page-load", f"{site}/page_b.html")
+
+
 def test_checkout_opens_new_slice_without_new_pageload(page, site):
     page.goto(f"{site}/page_b.html")
     assert start_recorder(

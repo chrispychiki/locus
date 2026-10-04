@@ -6,6 +6,7 @@
  * page, not a double's record of one.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { gunzipSync } from "fflate";
 
 import { installBrowserGlobals, makeWindow } from "./_support.js";
 
@@ -22,6 +23,7 @@ mock.module("@fingerprintjs/botd", () => ({
 }));
 
 const { autostart } = await import("../src/global.js");
+const { EventType } = await import("../src/rrweb_constants.js");
 
 const TAG = { src: "https://store.test/locus.min.js?id=abc123" };
 
@@ -35,6 +37,17 @@ const realFetch = globalThis.fetch;
 // are captured — which channel a ping rode is not this suite's business.
 const pings = () =>
 	shots.map(({ url, body }) => ({ target: url, ...JSON.parse(body) }));
+
+// The user ids the uploaded chunks recorded, in order.
+const identified = () =>
+	shots
+		.filter(({ url }) => url.includes("/chunks/"))
+		.flatMap(
+			({ body }) =>
+				JSON.parse(new TextDecoder().decode(gunzipSync(body))).events,
+		)
+		.filter((e) => e.type === EventType.Identify)
+		.map((e) => e.data.userId);
 
 beforeEach(() => {
 	shots = [];
@@ -112,5 +125,57 @@ describe("autostart", () => {
 
 		expect(pings().filter((p) => p.metric === "recorder_fault")).toEqual([]);
 		expect(typeof window.LocusRecorder.flush).toBe("function");
+		expect(typeof window.LocusRecorder.identify).toBe("function");
+	});
+});
+
+describe("identify on the marker", () => {
+	test("an id given before start() finishes is held, the latest winning, and recorded once it does", async () => {
+		const running = autostart(TAG);
+		const early = window.LocusRecorder.identify;
+		window.LocusRecorder.identify("first-guess");
+		window.LocusRecorder.identify("user-42");
+		expect(window.LocusRecorder.flush).toBeUndefined();
+		await running;
+
+		expect(window.LocusRecorder.identify).toBe(early);
+		await window.LocusRecorder.flush();
+		expect(identified()).toEqual(["user-42"]);
+	});
+
+	test("once recording, each call records its own Identify", async () => {
+		await autostart(TAG);
+		window.LocusRecorder.identify("user-42");
+		window.LocusRecorder.identify("user-43");
+		await window.LocusRecorder.flush();
+		expect(identified()).toEqual(["user-42", "user-43"]);
+	});
+
+	test("a page context that never records keeps identify and drops every id, before and after", async () => {
+		for (const setup of [
+			() => {
+				globalThis.window.location.hostname = "localhost";
+			},
+			() => {
+				recordThrows = true;
+			},
+		]) {
+			delete globalThis.window.LocusRecorder;
+			setup();
+			const running = autostart(TAG);
+			window.LocusRecorder.identify("held-then-dropped");
+			await running;
+			expect(Object.keys(window.LocusRecorder)).toEqual(["identify"]);
+			expect(() => window.LocusRecorder.identify("user-42")).not.toThrow();
+		}
+		expect(identified()).toEqual([]);
+	});
+
+	test("a bad id throws into the caller whatever the recorder's state", async () => {
+		globalThis.window.location.hostname = "localhost";
+		const running = autostart(TAG);
+		expect(() => window.LocusRecorder.identify(42)).toThrow(/must be a string/);
+		await running;
+		expect(() => window.LocusRecorder.identify("")).toThrow(/1–256/);
 	});
 });

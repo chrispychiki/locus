@@ -634,6 +634,45 @@ describe("start() capture-correctness", () => {
 		).toBe("undeclared");
 	});
 
+	test("the internal-traffic cookie stamps every chunk's envelope and every birth; its absence stamps a visitor", async () => {
+		for (const [jar, expected] of [
+			["locusVisitorId=Stable_Visitor-01; locusInternal=1", true],
+			["locusVisitorId=Stable_Visitor-01", false],
+		]) {
+			globalThis.document.cookie = jar;
+			const chunks = [];
+			const telemetry = {
+				pings: [],
+				emit(e) {
+					this.pings.push(e);
+				},
+			};
+			const r = await start({
+				sink: {
+					send: async (b) => {
+						chunks.push(decode(b));
+					},
+				},
+				telemetry,
+				botDetection: false,
+				intervalMs: 1_000_000,
+			});
+			capturedEmit(meta(1000));
+			capturedEmit(fullSnapshot(1001));
+			await settle();
+			await r.flush();
+			expect(chunks.length).toBeGreaterThan(0);
+			for (const chunk of chunks)
+				expect(chunk.envelope.internal).toBe(expected);
+			const births = telemetry.pings.filter(
+				(p) => p.metric === "slice_started",
+			);
+			expect(births.length).toBeGreaterThan(0);
+			for (const b of births) expect(b.internal).toBe(expected);
+			await r.stop();
+		}
+	});
+
 	test("a poisoned visitor cookie never reaches the chunk key", async () => {
 		globalThis.document.cookie = "locusVisitorId=bad id/with spaces";
 		const descriptors = [];
