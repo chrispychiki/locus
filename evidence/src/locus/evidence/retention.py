@@ -8,7 +8,7 @@ Expiry drops a slice whole: the slices row, its events, the recorder's error log
 
 Analyses (`data/analyses/`) are not recordings — they are the operator's findings, and they outlive what they cite. A citation into an expired recording then fails to open, which is the honest outcome: the finding stands, the evidence behind it is gone at the horizon like every other copy.
 
-Deletion is done with SQLite's secure_delete on, so the freed pages are zeroed rather than left readable in the file. The file itself does not shrink — the space is reused by later loads.
+Deletion is done with SQLite's secure_delete on, so the freed pages are zeroed rather than left readable in the file, and the sweep ends by handing every free page back to the filesystem (db.reclaim), so the file shrinks by what went.
 """
 
 import json
@@ -19,6 +19,7 @@ from pathlib import Path
 import tomllib
 
 from .chunk import parse_chunk_key, slice_date
+from .db import reclaim
 from .speak import beating
 
 CONFIG_FILE = "store/deploy.config.toml"
@@ -89,11 +90,9 @@ def expire(
     definition: dict,
     pages: Path | None = None,
 ) -> dict:
-    """Drop every recording in the db that opened before `cutoff`, and leave what remains current. Returns what went: the slices and events dropped, the visitors touched, the chunk manifest rows released, and whether the replay cache was cleared. Idempotent — a second run over the same db finds nothing left to drop.
+    """Drop every recording in the db that opened before `cutoff`, leave what remains current, and hand the free pages back to the filesystem — this sweep's and any a re-derivation left. Returns what went: the slices and events dropped, the visitors touched, the chunk manifest rows released, whether the replay cache was cleared, and the bytes the file gave back. Idempotent — a second run over the same db finds nothing left to drop.
 
     The sweep commits in batches of recordings, each batch its own transaction and its visitors' sessions re-derived inside it, because a corpus-scale sweep is millions of rows: one transaction would hold the whole deletion in the WAL and leave nothing durable if it died. So every commit point is a db with whole recordings gone and everything derived from them current, and a killed sweep resumes by simply running again."""
-    from .sessions import materialize_sessions
-
     expired = [
         row
         for row in conn.execute(
@@ -106,17 +105,25 @@ def expire(
         for row in conn.execute("SELECT key FROM loaded_chunks")
         if expired_key(row["key"], cutoff)
     ]
-    if not expired and not stale_chunks:
-        return {
-            "cutoff": cutoff,
-            "slices": 0,
-            "events": 0,
-            "visitors": 0,
-            "chunks": 0,
-            "pages_cleared": False,
-        }
+    events, cleared = (
+        _drop(conn, expired, stale_chunks, definition, pages)
+        if expired or stale_chunks
+        else (0, False)
+    )
+    return {
+        "cutoff": cutoff,
+        "slices": len(expired),
+        "events": events,
+        "visitors": len({row["visitor_id"] for row in expired}),
+        "chunks": len(stale_chunks),
+        "pages_cleared": cleared,
+        "reclaimed_bytes": reclaim(conn),
+    }
 
-    visitors = {row["visitor_id"] for row in expired}
+
+def _drop(conn, expired, stale_chunks, definition, pages):
+    from .sessions import materialize_sessions
+
     events = 0
     done = 0
     conn.execute("PRAGMA secure_delete=ON")
@@ -174,11 +181,4 @@ def expire(
             if path.is_file():
                 path.unlink()
                 cleared = True
-    return {
-        "cutoff": cutoff,
-        "slices": len(expired),
-        "events": events,
-        "visitors": len(visitors),
-        "chunks": len(stale_chunks),
-        "pages_cleared": cleared,
-    }
+    return events, cleared

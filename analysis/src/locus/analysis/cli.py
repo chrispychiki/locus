@@ -903,7 +903,8 @@ def main(argv=None) -> None:
         "doctor",
         help="check and heal the deployment's mechanical integrity — "
         "derivation currency, runtimes, the retention horizon over "
-        "the db, store drift, card price drift; non-zero exit while "
+        "the db, the db giving freed space back, store drift, card "
+        "price drift; non-zero exit while "
         "anything is unhealthy",
     )
     p.set_defaults(fn=_doctor)

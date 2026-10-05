@@ -164,6 +164,32 @@ def test_a_recording_past_the_horizon_leaves_with_everything_derived_from_it(tmp
     assert (again["slices"], again["events"], again["chunks"]) == (0, 0, 0)
 
 
+def test_what_the_sweep_drops_leaves_the_disk_too(tmp_path):
+    """The db is a cache in front of the store: a recording the horizon takes is gone from the file's size, not kept as free pages in a file that never shrinks."""
+    now = 1_749_600_000_000
+    old = [
+        recording(now - 60 * DAY_MS - n * 1000, visitor=f"v{n:03d}") for n in range(60)
+    ]
+    db = tmp_path / "events.db"
+    conn = connect(db)
+    assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2, (
+        "a db is born able to give space back"
+    )
+    load_chunks(conn, FakeStore(dict([*old, recording(now)])), stats=LoadStats())
+    for n in range(60):
+        materialize_slices(conn, f"v{n:03d}")
+    materialize_slices(conn, VISITOR)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = db.stat().st_size
+
+    dropped = expire(conn, slice_date(f"{now - 30 * DAY_MS:014d}-aaaa"), DEFINITION)
+
+    assert dropped["slices"] == 60
+    assert dropped["reclaimed_bytes"] > 0
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    assert db.stat().st_size == before - dropped["reclaimed_bytes"]
+
+
 def test_a_visitor_whose_every_recording_expired_leaves_nothing_behind(tmp_path):
     now = 1_749_600_000_000
     db = str(tmp_path / "events.db")

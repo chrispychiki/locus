@@ -568,3 +568,50 @@ def test_doctor_holds_the_db_to_the_horizon_and_says_what_went(
     (tmp_path / CONFIG_FILE).write_text("retention_days = 0\n")
     checks = run_doctor(capsys, clean=False)
     assert "at least" in checks["retention"]["finding"]
+
+
+def _db_born_without_reclaim(tmp_path) -> str:
+    """A db created before connect set incremental auto-vacuum: its first table written under SQLite's default mode, which then holds until a full VACUUM."""
+    import sqlite3
+
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db = tmp_path / "data" / "events.db"
+    raw = sqlite3.connect(db)
+    raw.execute("CREATE TABLE born_before(x)")
+    raw.commit()
+    raw.close()
+    return _hydrated_db(tmp_path, derived=True)
+
+
+def test_doctor_converts_a_db_that_never_gave_space_back(tmp_path, capsys, monkeypatch):
+    healthy_surroundings(tmp_path, monkeypatch)
+    db = _db_born_without_reclaim(tmp_path)
+    assert connect(db).execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+
+    checks = run_doctor(capsys)
+    assert checks["reclaim"]["healed"]["bytes_after"] > 0
+    assert connect(db).execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+
+    assert run_doctor(capsys)["reclaim"] == {"check": "reclaim", "ok": True}, (
+        "converted once; a converted db is simply healthy"
+    )
+
+
+def test_doctor_refuses_a_conversion_the_disk_cannot_take(
+    tmp_path, capsys, monkeypatch
+):
+    from collections import namedtuple
+
+    healthy_surroundings(tmp_path, monkeypatch)
+    db = _db_born_without_reclaim(tmp_path)
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(
+        "locus.analysis.doctor.shutil.disk_usage", lambda path: usage(1, 1, 1)
+    )
+
+    checks = run_doctor(capsys, clean=False)
+    assert checks["reclaim"]["ok"] is False
+    assert "VACUUM" in checks["reclaim"]["finding"]
+    assert connect(db).execute("PRAGMA auto_vacuum").fetchone()[0] == 0, (
+        "refused, the file is left exactly as it was"
+    )

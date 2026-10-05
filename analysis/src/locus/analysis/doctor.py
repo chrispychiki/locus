@@ -5,16 +5,18 @@ Doctor checks the judgment-free invariants — facts with exactly one correct an
 - **Derivation currency.** The db records the identity of what derived its surfaces — timestamps, slices, flat columns, projections, sessions — the deriving code and, for sessions, the operator's declared numbers; a recorded vintage differing from the installed identity means a change left every derived value behind, and rows hydration landed but materialization, distillation, or the session derivation never reached (a load that died partway) are stranded. Both heal mechanically, and doctor heals them itself, through the same derivation path a load drives — timestamps, slice, rescue, re-distill from raw_json, sessions.
 - **Runtimes.** bun and Playwright's Chromium are runtimes the CLI shells into. Installing software is not doctor's to do; a missing runtime is named with its install.
 - **Retention.** The deployment declares one horizon and it governs every copy of a recording, the local db included — a db nothing ever swept would keep forever what a load pulled, while the bucket's copy expired. So doctor applies it here as `locus load` does, dropping the recordings past it and saying what went; a horizon the declaration does not state as a whole number of days is unhealthy, because nothing can be swept by it.
+- **Reclaim.** The db is a cache in front of the store, and every retention sweep hands the space it freed back to the disk — in incremental auto-vacuum mode, which a db created before that mode was set holds only after one full VACUUM. Doctor runs that conversion, refusing with the numbers when the disk cannot take it.
 - **Store drift.** The repo's declaration is the source of truth for the live deployment and a deploy reconciles the live state back to it, so live state that differs is drift that will silently revert. What "matches" means is owned by the store package's own doctor (store/scripts/doctor.js, beside the provision that converges it); this check runs that script against the live Cloudflare API and carries its verdict, each drifted setting named with the command that fixes it.
 - **Profile size.** The operator profile (`data/operator.md`) is read before every piece of work, so it has a hard byte cap (PROFILE_CAP_BYTES, declared here). Shrinking it takes judgment — consolidation — so doctor names the consolidate-notes skill and never touches the file.
 - **Price drift.** A Gemini card's declared per-token prices are what every billed call's ledger entry and every spend wall computes dollars from, and the provider can reprice under them. The check is spend.verify_prices — the same best-effort registry comparison every price report runs — swept here across every Gemini card: a mismatch is drift naming both numbers and the card to edit; an absent registry key or unreachable registry is honestly unverified, never unhealthy. A Gemini card declaring no pricing block at all is unhealthy outright — every paid call on it refuses at construction.
 
 Everything that takes judgment — what capture is costing, whether PII is leaking, whether the deployment is healthy in any semantic sense — belongs to the agent composing over the observability primitives (`ae`, `usage`, the store listings), never to a verb.
 
-Safe to run anytime: reads, plus the idempotent derivation heal and the retention sweep — which deletes, and is meant to, on the deployment's own declared horizon. The report is JSON; a clean deployment reports every check ok, and the CLI exits non-zero while anything stays unhealthy.
+Safe to run anytime: reads, plus the idempotent derivation heal, the retention sweep — which deletes, and is meant to, on the deployment's own declared horizon — and the one-time reclaim conversion, which rewrites the db file whole. The report is JSON; a clean deployment reports every check ok, and the CLI exits non-zero while anything stays unhealthy.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -186,6 +188,46 @@ def _retention_check(deployment_root: Path, db: str | None, definition: dict) ->
     return {"check": "retention", "ok": True, "horizon_days": days, "expired": dropped}
 
 
+def _reclaim_check(db: str | None) -> dict:
+    """The db hands freed space back only in incremental auto-vacuum mode, which a db created before connect set it holds only after one full VACUUM — so doctor runs that conversion. VACUUM copies the live data into a temporary database and writes it back through the WAL, so at its peak it needs up to twice the live data free; short of that, the conversion is refused with the numbers rather than run into a full disk."""
+    from locus.evidence.db import connect, incremental, live_bytes
+    from locus.evidence.derive import derivation_lock
+
+    if db is None:
+        return {"check": "reclaim", "ok": True, "note": "no events.db yet"}
+    conn = connect(db)
+    try:
+        if incremental(conn):
+            return {"check": "reclaim", "ok": True}
+        need = 2 * live_bytes(conn)
+        free = shutil.disk_usage(Path(db).resolve().parent).free
+        before = Path(db).stat().st_size
+        if free < need:
+            return {
+                "check": "reclaim",
+                "ok": False,
+                "finding": f"events.db never gives freed space back to the disk "
+                f"({before / 1e9:.1f} GB on disk, {live_bytes(conn) / 1e9:.1f} GB of it "
+                f"data); converting it is one full VACUUM, which needs up to "
+                f"{need / 1e9:.1f} GB free and the volume has {free / 1e9:.1f} GB",
+                "fix": "free the difference on the db's volume and rerun doctor",
+            }
+        with derivation_lock(db):
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        return {
+            "check": "reclaim",
+            "ok": incremental(conn),
+            "healed": {
+                "converted": "events.db now hands freed space back to the disk",
+                "bytes_before": before,
+                "bytes_after": Path(db).stat().st_size,
+            },
+        }
+    finally:
+        conn.close()
+
+
 def _store_check(deployment_root: Path, bun_ok: bool) -> dict:
     store = deployment_root / "store"
     if not (store / "scripts" / "doctor.js").exists():
@@ -296,6 +338,7 @@ def run_doctor(deployment_root: Path, db: str | None, definition: dict) -> dict:
         _browser_check(),
         _derivations_check(db, bun["ok"], definition),
         _retention_check(deployment_root, db, definition),
+        _reclaim_check(db),
         _store_check(deployment_root, bun["ok"]),
         _profile_check(deployment_root),
         _pricing_check(),

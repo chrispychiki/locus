@@ -229,6 +229,11 @@ def _addable(conn: sqlite3.Connection, table: str, name: str, definition: str) -
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    # Incremental auto-vacuum, set before anything is written: on a new file it
+    # binds here; a db created without it records the setting and holds it from
+    # its next VACUUM (doctor's conversion). It is what lets reclaim hand freed
+    # pages back to the filesystem.
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
     # WAL, persisted into the db file on first connect: a load writes for
     # minutes, and the flat-fact plane — SQL from any process, the sqlite3 CLI
     # included — must read the last commit meanwhile, not "database is locked".
@@ -239,3 +244,28 @@ def connect(path: str | Path) -> sqlite3.Connection:
     _widen(conn)
     conn.commit()
     return conn
+
+
+INCREMENTAL = 2
+
+
+def incremental(conn: sqlite3.Connection) -> bool:
+    """Whether the db file holds incremental auto-vacuum — the mode reclaim needs. A db created before connect set it holds it only after one full VACUUM."""
+    return conn.execute("PRAGMA auto_vacuum").fetchone()[0] == INCREMENTAL
+
+
+def live_bytes(conn: sqlite3.Connection) -> int:
+    """The bytes the db's data occupies: its pages less the free ones."""
+    page = conn.execute("PRAGMA page_size").fetchone()[0]
+    pages = conn.execute("PRAGMA page_count").fetchone()[0]
+    free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    return (pages - free) * page
+
+
+def reclaim(conn: sqlite3.Connection) -> int:
+    """Hand every free page back to the filesystem and return the bytes given. The db is a cache in front of the store, so what leaves it — a retention sweep, a re-derivation's rewritten rows — should leave the disk too, not sit as free pages in a file that keeps the largest size it ever reached. incremental_vacuum frees a page per step, so it is stepped to the end; under WAL the file shrinks at checkpoint, so the checkpoint runs here. On a db not yet in incremental mode it gives nothing back."""
+    page = conn.execute("PRAGMA page_size").fetchone()[0]
+    before = conn.execute("PRAGMA page_count").fetchone()[0]
+    conn.execute("PRAGMA incremental_vacuum").fetchall()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    return (before - conn.execute("PRAGMA page_count").fetchone()[0]) * page
