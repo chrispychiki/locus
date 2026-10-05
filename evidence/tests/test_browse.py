@@ -209,6 +209,39 @@ def test_open_read_shows_refs_and_text(home, pages):
     assert "select" in out
 
 
+def test_a_live_site_opened_here_carries_the_internal_traffic_cookie_before_its_scripts_run(
+    home, pages
+):
+    """A site with the Locus tag records a visit from this browser stamped internal, not as a visitor: the cookie the recorder reads (recorder/src/visitor.js) is in the jar before any page script runs, on every http(s) document; a file:// page has no jar and the open does not trip over it."""
+    import http.server
+    import threading
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), lambda *a, **k: Quiet(*a, directory=str(pages), **k)
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/demo.html"
+        w = open_page(home, url)
+        code, out, err = browse(
+            home,
+            ["eval", w, "document.cookie.split('; ').includes('locusInternal=1')"],
+        )
+        assert code == 0, err
+        assert "true" in out
+        code, out, err = browse(home, ["open", w, str(pages / "demo.html")])
+        assert code == 0, err
+        code, out, err = browse(home, ["eval", w, "document.cookie"])
+        assert code == 0, err
+        assert "locusInternal" not in out
+    finally:
+        server.server_close()
+
+
 def test_an_error_the_page_throws_during_a_command_fails_that_command(home, pages):
     # A page that throws while a command runs — a replay refusing the moment its fragment
     # names — has answered the command; reporting the open as landed would hand the agent

@@ -162,6 +162,7 @@ def test_decode_maps_provenance_into_the_envelope():
                     "time_zone": None,
                     "screen_width": None,
                     "screen_height": None,
+                    "internal": 0,
                     "snippet": SNIPPET,
                     "script_version": "locus-recorder/0.1.0",
                     "recorder_slice": f"0{T0}-ab12",
@@ -189,6 +190,19 @@ def test_the_device_facts_only_the_browser_knew_reach_the_db():
     assert envelope["language"] == "fr-FR"
     assert envelope["time_zone"] == "Europe/Paris"
     assert (envelope["screen_width"], envelope["screen_height"]) == (2560, 1440)
+
+
+def test_the_internal_traffic_mark_lands_as_1_and_everything_else_as_a_visitor():
+    """The recorder stamps `internal: true` on a chunk whose page carried the internal-traffic cookie. Only that exact stamp is the mark: a chunk from a recorder that never had the concept, or one carrying anything but `true`, is a visitor's — the column is what every count excludes by, so it is never left open."""
+    for wire, expected in [
+        ({"internal": True}, 1),
+        ({"internal": False}, 0),
+        ({}, 0),
+        ({"internal": "1"}, 0),
+    ]:
+        blob = chunk_blob(f"0{T0}-ab12", [META], envelope=wire)
+        [(_, event)] = decode_or_skip(blob, "snip/2026-06-11/v/slice/k", SNIPPET)
+        assert event["_envelope"]["internal"] == expected, wire
 
 
 def test_a_transcoded_body_decodes_whole_from_under_the_gzip_wrapper():

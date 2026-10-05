@@ -560,6 +560,7 @@ def test_a_slice_carries_its_own_facts_so_no_site_or_device_read_walks_the_event
         time_zone="America/Denver",
         screen_width=390,
         screen_height=844,
+        internal=1,
         script_version="locus-recorder/0.5.3",
     )
     hydrate(conn, "v1", events)
@@ -567,7 +568,7 @@ def test_a_slice_carries_its_own_facts_so_no_site_or_device_read_walks_the_event
 
     rows = conn.execute(
         "SELECT status, snippet, url, device, os, browser, language, time_zone, "
-        "screen_width, screen_height, script_version FROM slices ORDER BY start_ts"
+        "screen_width, screen_height, internal, script_version FROM slices ORDER BY start_ts"
     ).fetchall()
     assert [dict(r) for r in rows] == [
         {
@@ -581,6 +582,7 @@ def test_a_slice_carries_its_own_facts_so_no_site_or_device_read_walks_the_event
             "time_zone": "America/Denver",
             "screen_width": 390,
             "screen_height": 844,
+            "internal": 1,
             "script_version": "locus-recorder/0.5.3",
         },
         {
@@ -594,6 +596,7 @@ def test_a_slice_carries_its_own_facts_so_no_site_or_device_read_walks_the_event
             "time_zone": "America/Denver",
             "screen_width": 390,
             "screen_height": 844,
+            "internal": 1,
             "script_version": "locus-recorder/0.5.3",
         },
     ]
@@ -635,6 +638,30 @@ def test_a_db_from_before_a_column_existed_is_widened_on_connect(tmp_path):
     }
     assert "snippet TEXT /* the site's snippet id" in stored["slices"]
     assert "session_id INTEGER /* sessions.id:" in stored["events"]
+
+
+def test_a_widened_default_column_fills_the_rows_that_predate_it(tmp_path):
+    """`internal` is declared with DEFAULT 0 because 0 is what a row from before the mark existed honestly holds — nothing marked it — so the ALTER that adds the column fills every standing row with it, and a count that excludes `internal = 1` needs no NULL clause for an old db."""
+    import sqlite3
+
+    db = tmp_path / "events.db"
+    old = sqlite3.connect(db)
+    old.executescript(
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, visitor_id TEXT NOT NULL, "
+        "timestamp INTEGER NOT NULL, type INTEGER NOT NULL, counter TEXT, "
+        "raw_json BLOB NOT NULL, content_hash TEXT NOT NULL, slice_id INTEGER, "
+        "type_str TEXT, snippet TEXT);"
+        "INSERT INTO events (visitor_id, timestamp, type, raw_json, content_hash) "
+        "VALUES ('v', 1, 4, X'00', 'h')"
+    )
+    old.close()
+
+    conn = connect(db)
+    assert conn.execute("SELECT internal FROM events").fetchone()[0] == 0
+    stored = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+    ).fetchone()[0]
+    assert "internal INTEGER DEFAULT 0 /* 1 when the page carried" in stored
 
 
 def test_every_declared_column_reads_as_the_schema_states_it():

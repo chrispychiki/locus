@@ -4,7 +4,7 @@ Lands raw rrweb events into events.db as the source of truth. Duplicate content 
 
 raw_json is stored zlib-compressed (pack_raw/raw_event, with raw.js the bun-side twin), which puts the raw plane structurally behind the readers that know how to parse rrweb, the same way the numeric→name boundary is structural: the queryable plane is the flat columns, and a bare SELECT of raw_json returns bytes. content_hash is always over the uncompressed canonical bytes; the compressed form is storage, never identity.
 
-The chunk decode (chunk.py) attaches an "_envelope" key (the device facts — device/os/browser/language/time_zone/screen_width/screen_height — plus script_version/recorder_slice/snippet: transport metadata, not rrweb content); it is popped into its own columns before canonicalization, so content hashes and raw_json stay pure rrweb. script_version is the producing recorder's version (the chunk payload's recorderVersion). recorder_slice is the slice identity the recorder stamped, carried on the chunk's sliceId — every event has one, and slice materialization keys slices by it. snippet is the site the events were recorded from — the chunk payload never carries it, so it rides in from the store key's leading part.
+The chunk decode (chunk.py) attaches an "_envelope" key (the device facts — device/os/browser/language/time_zone/screen_width/screen_height — the internal-traffic mark, plus script_version/recorder_slice/snippet: transport metadata, not rrweb content); it is popped into its own columns before canonicalization, so content hashes and raw_json stay pure rrweb. script_version is the producing recorder's version (the chunk payload's recorderVersion). recorder_slice is the slice identity the recorder stamped, carried on the chunk's sliceId — every event has one, and slice materialization keys slices by it. snippet is the site the events were recorded from — the chunk payload never carries it, so it rides in from the store key's leading part.
 """
 
 import hashlib
@@ -89,9 +89,9 @@ def event_skip_reason(event) -> str | None:
 INSERT_SQL = (
     "INSERT OR IGNORE INTO events "
     "(visitor_id, timestamp, type, counter, raw_json, content_hash, "
-    " device, os, browser, language, time_zone, screen_width, screen_height, "
+    " device, os, browser, language, time_zone, screen_width, screen_height, internal, "
     " script_version, recorder_slice, snippet) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -115,6 +115,7 @@ def _row(visitor_id: str, event: dict) -> tuple:
         envelope.get("time_zone"),
         envelope.get("screen_width"),
         envelope.get("screen_height"),
+        envelope.get("internal", 0),
         envelope.get("script_version"),
         envelope.get("recorder_slice"),
         envelope.get("snippet"),

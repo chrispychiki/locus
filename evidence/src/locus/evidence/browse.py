@@ -18,7 +18,9 @@ the window it acts on, so agents working in different windows never disturb each
 one the operator is looking at included.
 Commands run one at a time across all windows, so a slow command in one window holds the rest. State
 survives between commands: windows stay open, logins stick, refs from `read` stay clickable until
-that window navigates. Every reply opens with the window it acted on.
+that window navigates. Every reply opens with the window it acted on. A live site opened here
+records the visit as internal traffic, not as a visitor: every count leaves it out, and the
+recording is there to replay.
 
   open [wN] <target>                   navigate — a URL; a page path; a slice set or an analysis
                                        directory, whose replay material and default page are

@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS events (
     time_zone    TEXT,             -- the visitor's own zone: every timestamp here is UTC, so this is the only record of their local hour
     screen_width  INTEGER,         -- the display, not the viewport rrweb's Meta carries; the gap between them is a windowed browser
     screen_height INTEGER,
+    internal     INTEGER DEFAULT 0, -- 1 when the page carried the internal-traffic cookie the deployment's own tooling sets (locus browse does): a visit driven by the deployment, not a visitor — counts of visitors, sessions, and behavior leave these out. 0 is a visitor, a recorder that never said included
     script_version TEXT,           -- the recorder build that produced the event
     recorder_slice TEXT,           -- the recorder's own slice id, stamped on every event: slice identity, and what materialization keys on
     snippet      TEXT              -- the snippet id of the site this was recorded from, read from the object key
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS slices (
     time_zone      TEXT,
     screen_width   INTEGER,
     screen_height  INTEGER,
+    internal       INTEGER DEFAULT 0,   -- 1 when the deployment's own tooling drove this recording (events.internal); any internal slice marks the visitor as internal
     script_version TEXT                 -- the recorder build that produced the slice
 );
 CREATE INDEX IF NOT EXISTS slices_visitor ON slices(visitor_id, start_ts);
@@ -150,6 +152,7 @@ SLICE_FACTS = (
     "time_zone",
     "screen_width",
     "screen_height",
+    "internal",
     "script_version",
 )
 
@@ -164,7 +167,9 @@ WIDENED_INDEXES = (
 )
 
 _TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\);", re.DOTALL)
-_COLUMN = re.compile(r"^\s+(\w+)\s+([A-Z][A-Z ]*[A-Z])\s*,?\s*(?:--\s*(.*?))?\s*$")
+_COLUMN = re.compile(
+    r"^\s+(\w+)\s+([A-Z][A-Z ]*[A-Z](?: DEFAULT \d+)?)\s*,?\s*(?:--\s*(.*?))?\s*$"
+)
 
 
 def declared_columns() -> dict[str, dict[str, str]]:
@@ -189,7 +194,7 @@ def declared_columns() -> dict[str, dict[str, str]]:
 
 
 def _widen(conn: sqlite3.Connection) -> None:
-    """A table created before a column existed gets the column added, with the comment the schema above gives it, so a standing db reads by that schema — `.schema` included; the values land on the next derivation, which the derivation vintage forces because the deriving code changed. CREATE TABLE IF NOT EXISTS leaves an existing table as it was, so the widening is its own step."""
+    """A table created before a column existed gets the column added, with the comment the schema above gives it, so a standing db reads by that schema — `.schema` included; the values land on the next derivation, which the derivation vintage forces because the deriving code changed. A column declared with a DEFAULT fills its standing rows with it on the ALTER, so a default is the value a column honestly holds for rows that predate it, never a placeholder. CREATE TABLE IF NOT EXISTS leaves an existing table as it was, so the widening is its own step."""
     for table, columns in declared_columns().items():
         live = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for name, definition in columns.items():

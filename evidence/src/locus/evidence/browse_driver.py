@@ -5,6 +5,8 @@ One persistent Chromium (Locus's own Playwright build, its own profile under `da
 Instances are windows: each is its own OS window, addressed `w1`, `w2`, …, and every command names the window it acts on. There is no shared active window, so any number of agents drive their own windows through the one daemon without colliding, and an agent building in one window never disturbs a window the operator is looking at. `open` with no id makes a window for the page; when some window already holds that page, it refuses and names that window, because which window an agent means is the agent's to say. `show` is the only command that brings one to the front. `read` snapshots a window's page — ref-tagged interactables (`e1`, `e2`, …) plus visible text — and refs stay resolvable until that page navigates; acting on a stale ref fails loud and says to read again. The snapshot walk pierces open shadow roots; closed shadow content and cross-origin frames are not in it.
 
 Every reply opens with the window id it acted on, and an action that navigated says where it landed — the agent should never have to guess which page it is now talking to.
+
+Every http(s) document these windows load carries the internal-traffic cookie before any page script runs (INTERNAL_TRAFFIC_SCRIPT), so a live site with the Locus tag records the visit stamped `internal` rather than as a visitor — a capture check leaves a recording to replay and nothing in the counts.
 """
 
 import fcntl
@@ -436,6 +438,16 @@ class Browser:
         self.record.unlink(missing_ok=True)
 
 
+# The mark the recorder reads as internal traffic (recorder/src/visitor.js, INTERNAL_COOKIE). Set
+# on every document before its scripts run — an init script on the context — so the tag finds it
+# however the page was reached; a session cookie, re-set per document, so nothing outlives the
+# browser. file:// and about: documents have no jar to write, and the replay pages need none.
+INTERNAL_TRAFFIC_SCRIPT = (
+    "try { if (location.protocol === 'http:' || location.protocol === 'https:')"
+    " document.cookie = 'locusInternal=1; path=/; SameSite=Lax'; } catch (e) {}"
+)
+
+
 class Driver:
     """Instances are windows. Each is its own OS window, addressed w1, w2, …, and every command names the window it acts on — there is no shared active window for a second agent's command to move, so any number of agents drive their own windows through the one daemon without colliding. `open` with no id makes a window; when a window already holds that page it refuses and names the window. Every other verb takes an id. `show` is the only command that brings a window to the front, so an agent building in one window never steals the screen from a window the operator is looking at.
 
@@ -525,6 +537,7 @@ class Driver:
             self.headless
         )
         self.ctx = self.browser.contexts[0]
+        self.ctx.add_init_script(INTERNAL_TRAFFIC_SCRIPT)
         # The browser-level session windows are created and placed through.
         self.session = self.browser.new_browser_cdp_session()
         if fresh:
