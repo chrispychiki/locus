@@ -35,7 +35,7 @@ Placement scopes coverage: a shared template (a framework layout, a server-side 
 
 Tell the operator what the tag records: credential fields always masked, everything else verbatim (`recorder/README.md` § Privacy). For more masking, change the capture config (the change-deployment skill) — masking applies at record time, so rules the site wants belong in force before the tag goes live.
 
-Mention `identify`: the recorder attaches their own user id to a visitor's recordings (`recorder/README.md`), so questions can be about their logged-in users. Optional, and it can come any time (the change-deployment skill).
+Mention `identify`: the recorder attaches their own user id to a visitor's recordings (`recorder/README.md`), so questions can be about their logged-in users — and, once they give you access to their backend, about what it knows of those users. Optional, and it can come any time (the change-deployment skill).
 
 However it is placed, the tag must stay its own `<script src>` tag — a template, a tag manager, or an injected loader are all fine, but inlining the bundle's contents or importing it through a bundler breaks the id-and-origin read and the recorder stops with a console error naming exactly that (`recorder/README.md`). And never SRI-pin it: the bundle updates in place on every store deploy, so an `integrity` hash silently stops all recording at the next deploy.
 

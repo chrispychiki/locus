@@ -1,6 +1,6 @@
 # Locus evidence
 
-The mechanical layer: the store's chunks made trustworthy, queryable, and replayable. Load and hydration land raw rrweb in one local db, distillation derives compact text projections and flat columns onto the same rows, and the replay component and screenshot renderer turn any slice back into what the visitor's screen showed. Everything here is faithful derivation — meaning is never assigned; that is the analysis layer's.
+The mechanical layer: the store's chunks made trustworthy, queryable, and replayable. Load and hydration land raw rrweb in one local db, distillation derives compact text projections and flat columns onto the same rows, and the replay component and screenshot renderer turn any slice back into what the visitor's screen showed. Everything here is faithful derivation; nothing here assigns meaning.
 
 ## Storage
 
@@ -29,7 +29,7 @@ data/                                                everything the deployment a
     cache/                                           tool caches (ruff, the workspace-root pytest run)
 ```
 
-`locus browse` is the deployment's browser: headed windows the agent drives and the operator watches — a replay page opened at a citation, a slice played back for a doubted finding, a page the agent composed, the live site. Each instance is its own window, addressed `w1`, `w2`, …, every command names the window it acts on, and `show` is the only command that brings a window to the front. It is a daemon over the same Playwright Chromium the renderer uses, run as its own process, so windows, logins, and refs from `read` survive between commands and across the daemon's restarts. `open` on a page a window already holds refuses and names the window. `locus browse help` lists the commands.
+`locus browse` is the deployment's browser: headed windows the agent drives and the operator watches — a replay page opened at a citation, a slice played back for a doubted finding, a page the agent composed. Every http(s) page it loads carries the internal-traffic cookie, so a site with the Locus tag records the visit as internal traffic, which every count excludes (`recorder/README.md`). Each instance is its own window, addressed `w1`, `w2`, …, every command names the window it acts on, and `show` is the only command that brings a window to the front. It is a daemon over the same Playwright Chromium the renderer uses, run as its own process, so windows, logins, and refs from `read` survive between commands and across the daemon's restarts. `open` on a page a window already holds refuses and names the window. `locus browse help` lists the commands.
 
 ## Replay
 

@@ -7,7 +7,7 @@ A page holds what a message can't: figures and tables, a trend, a dashboard, a s
 
 ## What the page carries
 
-A page is read later, without you there to answer questions. So it carries what you would have said if asked: every number with its denominator, every "session" or "bounce" with the definition it was counted under (`config/definitions.toml`), every sampled figure as "about", and the UTC moment the page was true as of.
+A page is read later, without you there to answer questions. So it carries what you would have said if asked: every number with its denominator, the definition a "session" or "bounce" was counted under (`config/definitions.toml`) stated once on the page, every sampled figure as "about", and the UTC moment the page was true as of.
 
 The page speaks the operator's words: sites by domain (`locus status` names each snippet's), visitors by when and what they did. A visitor or slice id is a citation — small, beside the thing it locates — never a heading. Prose on the page points ("watch the third tap"); it never narrates what plays beside it. A chart earns its place only when a shape says what a sentence can't — a minimal hand-drawn mark on a quiet surface, so the replays and numbers stay loudest.
 

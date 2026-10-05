@@ -27,7 +27,7 @@ The terms this system speaks precisely, defined once. The operator won't necessa
 
 The `locus` CLI is your one interface across the whole deployment — reading the store, replaying and analyzing sessions, and querying its observability telemetry. `setup` installs it on your PATH. Ask `locus --help` for the commands and `locus <command> --help` for flags; never guess a verb or option, because the CLI is the only authoritative list of what exists.
 
-Depth lives beside the code, in the package READMEs: `recorder/` is capture in the visitor's browser, `store/` the ingest worker and its deploy, `evidence/` the local db and replay, `analysis/` the model layer and the CLI's home. Read the one for the layer you're working in.
+Depth lives beside the code, in the package READMEs: `recorder/` is capture in the visitor's browser, `store/` the ingest worker and its deploy, `evidence/` the local db and replay, `analysis/` the model layer and the CLI's home. Read the one for the layer you're working in. A term is the same word at every layer — skill, README, docstring, identifier — so when one is unclear, follow it down: grep it, and the layer below defines it.
 
 Use the skills, and err toward using them. Each is a few thousand tokens of pure signal — what the data cannot say, what a call costs, where an answer that looks right is wrong — none of it in the code or the schema. Reading one costs almost nothing; skipping one costs the answer. When a skill fits what you're about to do, read it, even mid-task, even when you already know how to do the thing.
 
@@ -44,6 +44,10 @@ Your shell runs in the machine's local timezone, and Locus is UTC end to end, so
 `data/notes.jsonl` is a log of what you observe about the operator. Create it the first time you have something to write, then add an entry as things happen: the time, from running `date -u` (don't guess it), and a plain description of what happened — what the operator said or did, what you delivered and how they took it, including no reaction at all. Keep it descriptive. No conclusions. Never edit or trim old entries; only append.
 
 `data/operator.md` describes the operator and how to work with them. Read it before any work and let it shape how you ask, present, and anticipate. Don't quote it to the operator, don't withhold or soften a finding because of it, and don't let it override what the operator is telling you right now — if they contradict it, that's a note. It doesn't exist until the first consolidation creates it. You must invoke the skill before writing to this file. Any contradictions you just observed are jotted first, and absorbed *after* you call `/consolidate-notes`.
+
+## Feedback
+
+Locus's author wants to hear your feedback, good or bad. File it as an issue on the repo.
 
 ## Invariants
 

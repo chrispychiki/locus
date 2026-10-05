@@ -1,6 +1,6 @@
 # Locus analysis
 
-The semantic layer: the evidence read into grounded, cited findings. An analysis composes an evidence window over a named slice set, drives a vision model over the event stream and screenshots, and lands a timestamp-cited answer whose citations open the replay. The `locus` CLI lives here.
+The model layer: the evidence read into grounded, cited findings. An analysis composes an evidence window over a named slice set, drives a vision model over the event stream and screenshots, and lands a timestamp-cited answer whose citations open the replay. The `locus` CLI lives here.
 
 `locus --help` lists the commands and `locus <command> --help` documents each one's flags — the CLI is the only authoritative account of what exists. A command hands back one line, the address of the log it says everything into, then the log's own body when the whole of it is small — a log ends with its run's result, so the tail of a long log is the answer, and a log that stops short of one is a run that died; the exceptions are `browse`, whose replies are a page being looked at, and an analysis run, which hands back its directory and says everything into the `analysis.log` inside, echoed the same way when small.
 
