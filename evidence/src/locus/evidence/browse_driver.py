@@ -4,7 +4,7 @@ One persistent Chromium (Locus's own Playwright build, its own profile under `da
 
 Instances are windows: each is its own OS window, addressed `w1`, `w2`, …, and every command names the window it acts on. There is no shared active window, so any number of agents drive their own windows through the one daemon without colliding, and an agent building in one window never disturbs a window the operator is looking at. `open` with no id makes a window for the page; when some window already holds that page, it refuses and names that window, because which window an agent means is the agent's to say. `show` is the only command that brings one to the front. `read` snapshots a window's page — ref-tagged interactables (`e1`, `e2`, …) plus visible text — and refs stay resolvable until that page navigates; acting on a stale ref fails loud and says to read again. The snapshot walk pierces open shadow roots; closed shadow content and cross-origin frames are not in it.
 
-Every reply opens with the window id it acted on, and an action that navigated says where it landed — the agent should never have to guess which page it is now talking to.
+Every reply opens with the window id it acted on, and an action that navigated says where it landed — the agent should never have to guess which page they are now talking to.
 
 Every http(s) document these windows load carries the internal-traffic cookie before any page script runs (INTERNAL_TRAFFIC_SCRIPT), so a live site with the Locus tag records the visit stamped `internal` rather than as a visitor — a capture check leaves a recording to replay and nothing in the counts.
 """
@@ -971,7 +971,7 @@ class Driver:
         return f"closed {wid}"
 
     def dispatch(self, argv: list[str]) -> str:
-        """Run one command and answer it. An error the page threw while the command ran — a replay refusing the moment its fragment asked for, a site script failing under a click — fails the command, named, over whatever it had to say: a reply that reported the page as landed while the page had refused would have the agent reading a frame it was never shown. Errors thrown meanwhile on other windows ride along as notes. Nothing thrown is dropped: an error that lands between commands is reported by the next one."""
+        """Run one command and answer it. An error the page threw while the command ran — a replay refusing the moment its fragment asked for, a site script failing under a click — fails the command, named, over whatever it had to say: a reply that reported the page as landed while the page had refused would have the agent reading a frame they were never shown. Errors thrown meanwhile on other windows ride along as notes. Nothing thrown is dropped: an error that lands between commands is reported by the next one."""
         cmd, rest = argv[0], list(argv[1:])
         fn = getattr(self, f"cmd_{cmd}", None)
         if fn is None:

@@ -24,7 +24,7 @@ data/                                                everything the deployment a
         locus-replay.js                              the player component (browse open keeps it current)
         {visitor}_{slice}[_plusN_{digest}].js        a slice set's replay payload
         *.html                                       the default pages browse open composes at derived
-                                                     names, and the agent's own pages under its own names
+                                                     names, and the agent's own pages under their own names
     analyses/…                                       analysis directories — one per run (analysis/README.md)
     cache/                                           tool caches (ruff, the workspace-root pytest run)
 ```

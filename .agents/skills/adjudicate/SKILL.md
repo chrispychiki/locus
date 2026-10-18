@@ -13,7 +13,7 @@ Some possible verdicts:
 
 - **The claim is right.** Sometimes the site really did do that.
 - **The evidence misrepresented the session.** The event stream doesn't match what the replay shows, or a relevant screenshot was missing.
-- **The evidence was faithful and the model misread it.** The model simply isn't capable enough, or a bad prompt steered it wrong.
+- **The evidence was faithful and the model misread it.** The model simply isn't capable enough, or a bad prompt steered them wrong.
 - **The analysis was constructed badly.** The question was vague, or the window didn't include the relevant slice(s).
 - **Your synthesis was wrong.** The supports hold and the conclusion built on them doesn't.
 - **The operator's inputs steered it.** The site context or a definition is stale or wrong, and the model read faithfully under the bad frame.

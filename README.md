@@ -60,7 +60,7 @@ On the Gemini backend, the heaviest thing Locus runs is Chromium, so 8GB of RAM 
 
 Recordings are stored in an [R2 bucket](https://developers.cloudflare.com/r2/), and metrics are emitted to [Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/). Without loading, you know what arrived and the recorder's telemetry, not what anyone saw or did. A chunk's R2 key is `site/date/visitor/slice/chunk`: a date range is a cheap prefix listing, a whole site is a scan.
 
-Visitors are pseudonymous ids, a first-party cookie the recorder mints; `identify` attaches your user id from your backend when they log in. Locus doesn't collect your backend's events, so before your agent can join the two you have to give it a way into wherever they live (see `recorder/`).
+Visitors are pseudonymous ids, a first-party cookie the recorder mints; `identify` attaches your user id from your backend when they log in. Locus doesn't collect your backend's events, so before your agent can join the two you have to give them a way into wherever they live (see `recorder/`).
 
 `store/` contains the [Cloudflare Worker](https://developers.cloudflare.com/workers/) that accepts chunks and vends the recorder script to the tag. Our stack is Cloudflare (CF) because it is cheaper than AWS, has free data egress, and serves the script as a static asset, which doesn't count as a worker invocation.
 
@@ -68,11 +68,11 @@ Visitors are pseudonymous ids, a first-party cookie the recorder mints; `identif
 
 `rrweb` recordings are meant for session replay, which means we incidentally get a comprehensive stream of user actions and DOM events that LLMs can extract meaning from — the fundamental reason retroactive semantics works. The raw stream is far too noisy to dump into context, so [`evidence/`](evidence/) loads recordings into a local db and distills them into what a model can read, with enough flattened into columns that your agent can query for the relevant visitors and sessions.
 
-Everything after capture runs on your machine, so your agent has to load recordings before it can ask anything of them, and it loads only what a question needs.
+Everything after capture runs on your machine, so your agent has to load recordings before asking anything of them, and loads only what a question needs.
 
 ### Analysis
 
-Your high-level directive gets decomposed by your agent into a set of analyses and their questions, based on complexity and scope. [`analysis/`](analysis/) — also home of the `locus` CLI — hands each one to the model as events, screenshots around user activity, recording facts, your website context, and the question; the model can ask to see more moments (its call, not a heuristic's). Every analysis is priced before it spends, and your spend caps are enforced on every billed call.
+Your high-level directive gets decomposed by your agent into a set of analyses and their questions, based on complexity and scope. [`analysis/`](analysis/) — also home of the `locus` CLI — hands each one to the model as events, screenshots around user activity, recording facts, your website context, and the question; the model can ask to see more moments (their call, not a heuristic's). Every analysis is priced before it spends, and your spend caps are enforced on every billed call.
 
 I recommend Gemini for these low level analyses — a vibes-based prior, but I believe it has the best visual intelligence per dollar. That might change in a month, so the backend is swappable. Local models, unless you have a server rack at home, aren't a primary workhorse: ~30B models aren't ready for this yet (again, vibes), but they're a free way to see it all work end to end, and might suffice if your site and questions are simple enough.
 

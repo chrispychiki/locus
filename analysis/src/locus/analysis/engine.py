@@ -35,7 +35,7 @@ It is control flow over modules whose logic stays in their own homes:
     the conversation as it stands; the engine serves the screenshots that fit.
 
 Runtime: compose the window with the pushed activity-screenshots; the model
-calls request_screenshots at the moments it needs detail on — pushed or not —
+calls request_screenshots at the moments they need detail on — pushed or not —
 which the renderer produces fresh on demand and the engine feeds back at the
 card's detail tier; the next turn is the timestamp-cited answer.
 Before anything ships, the answer is validated mechanically — every citation

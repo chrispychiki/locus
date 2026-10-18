@@ -2068,7 +2068,7 @@ def test_a_run_told_to_stop_leaves_a_last_word(capsys, tmp_path):
 
 
 def test_run_is_absent_from_help_but_parses(capsys):
-    """The spend step is learned from a price report that fits, never from the flag list — a first-contact agent must not be able to compose a spending invocation before it has held a price."""
+    """The spend step is learned from a price report that fits, never from the flag list — a first-contact agent must not be able to compose a spending invocation before they have held a price."""
     with pytest.raises(SystemExit, match="0"):
         main(["analyze", "--help"])
     assert "--run" not in capsys.readouterr().out

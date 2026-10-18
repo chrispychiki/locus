@@ -62,7 +62,7 @@ _PULL = """The screenshots above are a sample; you can ask to see any moment, in
 
 
 def reply_block(*, pull: bool) -> str:
-    """The blocks that close every turn that writes an answer fresh. REPLY_FORMAT restates the citation demand at the moment of writing — the system prompt states it once at the top of a long context, and a model answering a sparse window drops it from there — and asks for the feedback section. SCREENSHOT_REQUESTS rides beside it while the task's one request is unspent. The citation format is pinned because citations are addresses (claim spans, replay seeks), and a model left to itself drifts into bold, backticks, or bare timestamps."""
+    """The blocks that close every turn that writes an answer fresh. REPLY_FORMAT restates the citation demand at the moment of writing — the system prompt states it once at the top of a long context, and a model answering a sparse window drops it from there — and asks for the feedback section. SCREENSHOT_REQUESTS rides beside it while the task's one request is unspent. The citation format is pinned because citations are addresses (claim spans, replay seeks), and a model left alone drifts into bold, backticks, or bare timestamps."""
     blocks = [
         f"\n<REPLY_FORMAT>\n    As you write, {CITE_RULE}.\n    {_FEEDBACK}\n</REPLY_FORMAT>\n"
     ]
@@ -153,5 +153,5 @@ def split_meta(text: str) -> tuple[str, str | None]:
 
 
 def question_task(question: str, closing: str = "") -> str:
-    """The caller's entire question, sent last on the turn that answers it. closing lands after all of it — the last thing the model reads before it acts — for a caller whose model can still do something other than write (the engine, whose model can pull more screenshots)."""
+    """The caller's entire question, sent last on the turn that answers it. closing lands after all of it — the last thing the model reads before they act — for a caller whose model can still do something other than write (the engine, whose model can pull more screenshots)."""
     return f"<QUESTION>\n{question}\n</QUESTION>\n{closing}"

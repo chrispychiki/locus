@@ -117,7 +117,7 @@ def _narrate_retries() -> None:
 
 
 def _add_property_ordering(schema):
-    """Gemini 3 generates an object's keys in propertyOrdering order and, absent it, can emit malformed structured output; pydantic's json_schema omits the field. Stamp each object with its declared property order (recursing through $defs, nested objects, and array items) so the order the model is told to emit matches the schema it was given."""
+    """Gemini 3 generates an object's keys in propertyOrdering order and, absent it, can emit malformed structured output; pydantic's json_schema omits the field. Stamp each object with its declared property order (recursing through $defs, nested objects, and array items) so the order the model is told to emit matches the schema they were given."""
     if isinstance(schema, dict):
         if isinstance(schema.get("properties"), dict):
             schema["propertyOrdering"] = list(schema["properties"])

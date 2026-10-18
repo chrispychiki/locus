@@ -962,7 +962,7 @@ def main(argv=None) -> None:
     )
     # Deliberately absent from --help: the spend step is learned from a price
     # that fits, never from the flag list — a first-contact agent cannot
-    # compose a spending invocation before it has held the price.
+    # compose a spending invocation before they have held the price.
     p.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
     p.add_argument(
         "--screenshot-interval",

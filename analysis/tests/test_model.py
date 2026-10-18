@@ -1063,7 +1063,7 @@ def test_local_tool_call_arguments_that_never_parse_are_marked_not_raised(tmp_pa
 
 
 def test_local_tool_result_must_answer_a_call_the_model_made(tmp_path):
-    """A result addressed to a call the model never made answers into the void, and the call it did make
+    """A result addressed to a call the model never made answers into the void, and the call they did make
     goes unanswered — the model then waits on a turn that never comes. Refuse it at the boundary."""
     conversation = _streaming_conversation(
         record_dir=tmp_path / "r",

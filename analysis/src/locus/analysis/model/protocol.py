@@ -301,7 +301,7 @@ class Conversation(ABC):
                 raise ValueError(
                     f"model returned no structured output (label={label!r}; "
                     f"content was empty — typically the model burned "
-                    f"max_tokens inside its thinking block); the full "
+                    f"max_tokens inside their thinking block); the full "
                     f"response is in the persisted payloads"
                 )
             from pydantic import TypeAdapter

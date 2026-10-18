@@ -1205,7 +1205,7 @@ def test_citation_violations_is_the_format_made_mechanical():
 
 
 def test_a_citation_is_valid_as_far_out_as_the_payload_stamps_it():
-    """The payload prints a moment's minutes unbounded — a comparative window's later slices sit days after its start — and the model cites the stamp it was shown, so the citation form admits what the payload emits."""
+    """The payload prints a moment's minutes unbounded — a comparative window's later slices sit days after its start — and the model cites the stamp they were shown, so the citation form admits what the payload emits."""
     from locus.analysis.window import citation_violations, format_offset
 
     late = 1_000_000 + 2079 * 60_000 + 37_620

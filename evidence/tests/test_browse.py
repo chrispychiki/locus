@@ -245,7 +245,7 @@ def test_a_live_site_opened_here_carries_the_internal_traffic_cookie_before_its_
 def test_an_error_the_page_throws_during_a_command_fails_that_command(home, pages):
     # A page that throws while a command runs — a replay refusing the moment its fragment
     # names — has answered the command; reporting the open as landed would hand the agent
-    # a page in a state it was never told about.
+    # a page in a state they were never told about.
     code, out, err = browse(home, ["open", f"{pages / 'throws.html'}#boom-open"])
     assert code == 1, out
     w = win_of(err)

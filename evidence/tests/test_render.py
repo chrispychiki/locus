@@ -280,7 +280,7 @@ def test_a_screenshot_with_no_replayer_is_refused_rather_than_captured_blank(
     """A readiness wait that answered "nothing pending, nothing failed, no timeout" when the
     replayer's document isn't there at all would be a clean bill of health for a page that does not
     exist — and capture() would screenshot on it. A blank screenshot, certified faithful, is the worst
-    thing this module can produce: the model grounds its claims on exactly these pixels."""
+    thing this module can produce: the model grounds their claims on exactly these pixels."""
     slice_row = corpus.execute(
         "SELECT id, start_ts, end_ts FROM slices WHERE status='replayable' ORDER BY n_events DESC LIMIT 1"
     ).fetchone()
