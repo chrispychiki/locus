@@ -1,0 +1,3 @@
+[install]
+# 48h supply-chain cooldown: refuse packages published more recently than this.
+minimumReleaseAge = 172800

@@ -1,10 +1,10 @@
-# Every Python module in the repo lints and formats on ruff's shipped defaults.
-# Run `uv run ruff check` / `uv run ruff format` inside a module.
+# The whole repo lints and formats on ruff's shipped defaults, plus the lint settings below.
+# `bun run lint` and `bun run format` run it, with biome, over the whole tree from anywhere in the repo.
 # The generated constants file must stay byte-identical to what the generator
 # emits — a guard test compares them.
 exclude = ["evidence/src/locus/evidence/rrweb_constants.py"]
 # The cache lands in the deployment's accreted data directory, resolved
-# relative to this file, so a run from inside a module caches there too.
+# relative to this file.
 cache-dir = "data/cache/ruff"
 
 [lint]

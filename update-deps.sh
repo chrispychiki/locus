@@ -11,7 +11,7 @@ EXTRAS=""
 if .venv/bin/python -c 'import mlx_vlm' >/dev/null 2>&1; then EXTRAS="--extra mlx"; fi
 uv sync $EXTRAS
 
-for pkg in evidence/distill recorder store; do
+for pkg in . evidence/distill recorder store; do
   (cd "$pkg" && bun update)
 done
 

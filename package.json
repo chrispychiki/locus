@@ -1,0 +1,12 @@
+{
+	"name": "locus",
+	"private": true,
+	"scripts": {
+		"lint": "./node_modules/.bin/biome lint . && uv run python -m ruff check",
+		"format": "./node_modules/.bin/biome format --write . && uv run python -m ruff format"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.15"
+	},
+	"license": "Apache-2.0"
+}

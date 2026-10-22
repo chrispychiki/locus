@@ -3,7 +3,8 @@
 	"type": "module",
 	"private": true,
 	"scripts": {
-		"lint": "biome lint ."
+		"lint": "bun run --cwd ../.. lint",
+		"format": "bun run --cwd ../.. format"
 	},
 	"dependencies": {
 		"@rrweb/types": "2.1.1",
@@ -11,7 +12,6 @@
 		"rrweb": "2.1.1"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.9",
 		"postcss": "8.5.26"
 	}
 }

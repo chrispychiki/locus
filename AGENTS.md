@@ -31,7 +31,7 @@ Depth lives beside the code, in the package READMEs: `recorder/` is capture in t
 
 Use the skills, and err toward using them. Each is a few thousand tokens of pure signal — what the data cannot say, what a call costs, where an answer that looks right is wrong — none of it in the code or the schema. Reading one costs almost nothing; skipping one costs the answer. When a skill fits what you're about to do, read it, even mid-task, even when you already know how to do the thing.
 
-Lint and format from inside a module, where the pinned tools live: `uv run ruff check` / `uv run ruff format` in Python, `bun run lint` / `bunx biome format` in JS. Both resolve their config (`ruff.toml`, `biome.jsonc`) from the repo root.
+`bun run lint` lints and `bun run format` formats, from anywhere in the repo: each covers the whole tree, JS with biome and Python with ruff, under the root's `biome.jsonc` and `ruff.toml`.
 
 ## Time
 

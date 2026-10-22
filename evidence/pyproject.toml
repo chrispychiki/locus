@@ -21,7 +21,6 @@ dev = [
     "pillow>=12.2.0",
     "pytest==8.3.4",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.16.0",
 ]
 
 [build-system]

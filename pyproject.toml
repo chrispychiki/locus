@@ -1,6 +1,11 @@
 [tool.uv.workspace]
 members = ["evidence", "analysis"]
 
+[dependency-groups]
+dev = [
+    "ruff>=0.16.0",
+]
+
 [tool.uv]
 package = false
 # 48h supply-chain cooldown, for every resolution this workspace does.

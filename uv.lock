@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -19,6 +19,9 @@ members = [
     "locus-analysis",
     "locus-evidence",
 ]
+
+[manifest.dependency-groups]
+dev = [{ name = "ruff", specifier = ">=0.16.0" }]
 
 [[package]]
 name = "annotated-doc"
@@ -801,7 +804,6 @@ mlx = [
 dev = [
     { name = "pytest" },
     { name = "pytest-xdist" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -827,7 +829,6 @@ provides-extras = ["mlx"]
 dev = [
     { name = "pytest", specifier = "==8.3.4" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.16.0" },
 ]
 
 [[package]]
@@ -845,7 +846,6 @@ dev = [
     { name = "pillow" },
     { name = "pytest" },
     { name = "pytest-xdist" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -860,7 +860,6 @@ dev = [
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "pytest", specifier = "==8.3.4" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.16.0" },
 ]
 
 [[package]]

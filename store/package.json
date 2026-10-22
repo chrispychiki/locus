@@ -9,11 +9,11 @@
 		"provision": "bun run scripts/provision.js",
 		"deploy": "bun install && bun run build && bun run provision && wrangler deploy",
 		"doctor": "bun run scripts/doctor.js",
-		"lint": "biome lint .",
+		"lint": "bun run --cwd .. lint",
+		"format": "bun run --cwd .. format",
 		"test": "bun test"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.9",
 		"fflate": "^0.8.3",
 		"wrangler": "^4.125.0"
 	}

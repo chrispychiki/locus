@@ -23,6 +23,7 @@ BIN_DIR="$(uv tool dir --bin)"
 EXTRAS=""
 if "$REPO/.venv/bin/python" -c 'import mlx_vlm' >/dev/null 2>&1; then EXTRAS="--extra mlx"; fi
 uv sync --project "$REPO" $EXTRAS
+bun install --frozen-lockfile --cwd "$REPO"
 bun install --frozen-lockfile --cwd "$REPO/evidence/distill"
 mkdir -p "$BIN_DIR"
 ln -sf "$REPO/.venv/bin/locus" "$BIN_DIR/locus"
