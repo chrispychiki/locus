@@ -261,6 +261,10 @@ CHROME_ARGS = [
     "--silent-launch",
     "--use-mock-keychain",
     "--password-store=basic",
+    # Cast and DIAL discovery multicasts on the local network as soon as a page shows a
+    # cast button, and macOS asks the operator for Local Network permission in a modal
+    # dialog. Nothing these windows do casts.
+    "--disable-features=MediaRouter,DialMediaRouteProvider",
     "--no-first-run",
     "--no-default-browser-check",
     "--no-service-autorun",
