@@ -33,7 +33,7 @@ logger = logging.getLogger("locus.analysis.mlx.vision_chunking")
 DEFAULT_CHUNK_MPX = 16.0
 
 EXPECTED_CALL_SHA256 = (
-    "012ef942326f600189fa96b338a22d90c18cdad4ce73313669e1a84ddbdee183"
+    "31a29bbfcf8c415894dd66b137f9f71e4d4de210d9617753491d20e5dbebc8d4"
 )
 
 

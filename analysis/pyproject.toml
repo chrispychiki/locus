@@ -19,22 +19,18 @@ dependencies = [
 # runs; the entry points refuse loudly and name this extra (mlx/__init__.py).
 [project.optional-dependencies]
 mlx = [
-    # The floors name a broken pairing, not a preference. mlx 0.32 made GPU streams thread-scoped,
-    # crashing the qwen3_5 vision path in server mode on every earlier mlx-vlm
-    # (https://github.com/Blaizzy/mlx-vlm/issues/1614); mlx-vlm 0.6.15 is the first release fixed
-    # and tested against mlx 0.32.1, so the two floors move together. There is no ceiling because
+    # The floors name what the server relies on, not a preference. mlx-vlm 0.7.10 is the release
+    # this layer is validated against: its chat handler renders each image in the message, and at
+    # the position, that carried it, and its sampler honors a request's top_k, which the cards
+    # claim. It requires mlx 0.32.4, so the two floors move together. There is no ceiling because
     # the lockfile already pins what installs: a newer mlx-vlm arrives only through a deliberate
     # upgrade, and the upstream-keyed patches in serve.py and neighbors verify the source they
     # stand in for at boot and refuse to serve on any other version (mlx/patching.py) — the
     # upgrade is a re-validation event, never a silent behavior swap.
-    "mlx>=0.32.1; sys_platform == 'darwin'",
-    "mlx-vlm>=0.6.15; sys_platform == 'darwin'",
+    "mlx>=0.32.4; sys_platform == 'darwin'",
+    "mlx-vlm>=0.7.10; sys_platform == 'darwin'",
     "uvicorn; sys_platform == 'darwin'",
     "requests; sys_platform == 'darwin'",
-    # mlx-vlm's server renders chat templates through transformers' jinja2 renderer but does not
-    # declare jinja2 (it rode in transitively until mlx-vlm 0.6.15 dropped its mlx-lm dependency);
-    # without it every chat completion 500s at template render.
-    "jinja2; sys_platform == 'darwin'",
     # HEIC/HEIF decode for the images the server is handed (PIL alone cannot open them);
     # registered process-wide at boot in serve.py.
     "pillow-heif; sys_platform == 'darwin'",

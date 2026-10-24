@@ -28,7 +28,7 @@ Every Gemini card declares the block, because its wire always bills — a Gemini
 The shipped openai-compatible card declares none: a call to the bundled server spends nothing real.
 
 The supported-fields set is the declared boundary: a card may only carry sampling fields the upstream engine verifiably honors end to end.
-Upstream's batched sampler implements temperature/top_p (top_k and min_p are accepted at the wire and dropped before the draw); penalties run as windowed logit processors — verified at mlx-vlm 0.6.2 (https://github.com/Blaizzy/mlx-vlm/blob/v0.6.2/mlx_vlm/server/generation.py: _PositionedTargetSampler.__init__ takes only temperature/top_p/seed, and _make_logits_processors passes presence_context_size/repetition_context_size to make_logits_processors).
+Upstream's batched sampler implements temperature/top_p/top_k (min_p is accepted at the wire and dropped before the draw); penalties run as windowed logit processors — verified at mlx-vlm 0.7.10 (https://github.com/Blaizzy/mlx-vlm/blob/v0.7.10/mlx_vlm/server/generation.py: _make_sampler builds _PositionedTargetSampler from temperature/top_p/top_k/seed alone, and _make_logits_processors passes presence_context_size/repetition_context_size to make_logits_processors).
 Extend SUPPORTED_SAMPLING only after verifying the engine honors the new field at the draw.
 """
 
@@ -42,6 +42,7 @@ CARDS_DIR = "cards"
 SUPPORTED_SAMPLING = {
     "temperature",
     "top_p",
+    "top_k",
     "presence_penalty",
     "presence_context_size",
 }

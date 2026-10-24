@@ -16,5 +16,6 @@ headroom = 0.8
 [sampling]
 temperature = 1.0
 top_p = 0.95
+top_k = 20
 presence_penalty = 1.5
 presence_context_size = 32768

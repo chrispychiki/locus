@@ -1,17 +1,15 @@
 """Thin locus layer over the upstream mlx-vlm server.
 
 Upstream (mlx_vlm.server) owns generation: continuous batching, structured output, thinking budget, APC prefix caching, speculative decode, vision feature cache.
-This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), two math-preserving patches (the GQA decode kernel, the vision-encode chunking), and one that renders a conversation's images in the message, and at the moment, that carried them (media_placement). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
+This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), and a math-preserving patch (the vision-encode chunking). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
 README.md says what each is for.
 
 Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
-- top_k/min_p are accepted per-request but dropped by the batched sampler; the cards therefore do not claim top_k.
-- mlx's decode-attention kernel halves its bandwidth on high-GQA shapes; gqa_decode.install_gqa_decode routes eligible calls to a shared-tile kernel.
+- min_p is accepted per-request but never reaches the batched sampler; the cards therefore do not claim it.
 - a request's images encode in one batch, so the vision-encode transient scales with the request's total pixels and no token-denominated guard bounds it — a large enough image batch aborts the server even when it fits the token context (MAX_KV_SIZE counts expanded vision tokens, so its guard doesn't close this).
   Patched here: vision_chunking.install_vision_encode_chunking encodes in pixel-bounded chunks, output-identical on the pinned upstream.
-- the chat-completions handler flattens every message's media away before templating: a conversation's images all land on its newest user message, and a message's own text/image interleaving collapses to an image block ahead of its text. media_placement.install_media_placement renders each image where its message put it.
+- the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request. Every locus client sends `[]` (model/openai_compat.py, chat.py).
 - thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
-- a prefill batch of several prompts with a large length spread faults get_rope_index and 500s every in-flight request (upstream issue https://github.com/Blaizzy/mlx-vlm/issues/1346); admission serves one request at a time, so its prefill batch is always one row and the fault has no path.
 
 Usage: locus-mlx-serve <model-slug>   (slugs are the models.toml keys)
 """
@@ -229,7 +227,7 @@ class Admission:
 class AdmissionMiddleware:
     """Admission to the generating routes: one request resident at a time, first come first served, the line as long as it is.
 
-    A request holds the slot from admission until its response is done, whatever ended it. One resident request is the whole memory policy: the machine holds the weights, one cache, and one prefill's working set, never a batch, and whether that fits under the dial is not projectable from the request — memory is a function of upstream's forward pass over the request's exact shape, not of its token count — so nothing is refused for memory; a request that does not fit dies in Metal, and the cut is made after the fact (analysis/README.md). It is also the whole throughput policy on this backend: a prefill saturates the GPU and starves every decode sharing it, and a batched decode over rows padded to the longest reads more cache per step than it saves in weights, so a second resident request costs more than it returns. Serving one at a time also keeps upstream's prefill batch at one row (the get_rope_index fault in the module docstring). The line behind the slot is as long as it is — a waiting caller holds its own request body in this process's heap and nothing else (the body is read off the socket while it waits, which is how its disconnect is seen, and a caller that disconnects leaves the line) — and /health says how long."""
+    A request holds the slot from admission until its response is done, whatever ended it. One resident request is the whole memory policy: the machine holds the weights, one cache, and one prefill's working set, never a batch, and whether that fits under the dial is not projectable from the request — memory is a function of upstream's forward pass over the request's exact shape, not of its token count — so nothing is refused for memory; a request that does not fit dies in Metal, and the cut is made after the fact (analysis/README.md). It is also the whole throughput policy on this backend: a prefill saturates the GPU and starves every decode sharing it, and a batched decode over rows padded to the longest reads more cache per step than it saves in weights, so a second resident request costs more than it returns. The line behind the slot is as long as it is — a waiting caller holds its own request body in this process's heap and nothing else (the body is read off the socket while it waits, which is how its disconnect is seen, and a caller that disconnects leaves the line) — and /health says how long."""
 
     def __init__(self, asgi_app, admission):
         import asyncio
@@ -498,25 +496,11 @@ def main() -> None:
     install_heif_decode()
     install_preprocess_serializer()
 
-    from .gqa_decode import install_gqa_decode
-
-    install_gqa_decode()
-    logger.info(
-        "gqa decode kernel installed: eligible qwen3_5 decode-attention calls route to the shared-tile kernel"
-    )
-
     from .vision_chunking import install_vision_encode_chunking
 
     install_vision_encode_chunking()
     logger.info(
         "vision-encode chunking installed: a request's images encode in pixel-bounded chunks (LOCUS_MLX_ENCODE_CHUNK_MPX)"
-    )
-
-    from .media_placement import install_media_placement
-
-    install_media_placement()
-    logger.info(
-        "media placement installed: a request's images render in the message, and at the moment, that carried them"
     )
 
     from mlx_vlm.server import app

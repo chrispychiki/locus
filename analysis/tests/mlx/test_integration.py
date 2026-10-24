@@ -61,6 +61,7 @@ def chat(
         "max_tokens": max_tokens,
         "enable_thinking": enable_thinking,
         "stream": stream,
+        "context_management": [],
     }
     if stream:
         body["stream_options"] = {"include_usage": True}

@@ -7,11 +7,12 @@ Client and server share a filesystem: images travel as plain absolute paths and 
 - thinking arrives as `reasoning` on the message (`reasoning_content` is read first for compatibility); assistant replay turns carry both keys, and the server hands `reasoning_content` to the chat template, which renders it by the model family's own convention (Qwen renders it only for an assistant turn that comes after the conversation's last user turn, so a reply the conversation has since asked something about replays as its answer alone);
 - the default timeout is None — infinite — because local generation can outrun any fixed budget;
 - every request is priced before send and refused loud when the count plus max_tokens exceeds the card's context_tokens — before paying tokenization and upload for a doomed request. The turn-1 count walks the composed parts with the composition plane's own instruments (budget.py: the pinned tokenizer for text, the smart_resize closed form over real image dimensions — exact there, because everything on turn 1 is client-authored text and images); every later count, the refusal's and context_remaining's alike, anchors on the last response's usage total — the wire's own record — plus the priced delta of parts appended since it. The server enforces the same bound when MAX_KV_SIZE is set (its count includes expanded vision tokens); the client refusal is the cheap, informative half. The client arithmetic is one model family's wire behavior — the card declares its membership (`family`, validated in cards.py), so a model outside the family is refused at card load rather than silently priced and resized with math that is not its own;
+- every request sends `context_management: []`. Upstream's chat handler otherwise compacts the conversation: it clamps max_tokens to the context left and, past the limit, replaces the conversation's head with a model-written summary. With it, the conversation is served exactly as composed, and a request over the limit meets the server's own refusal;
 - images are carried under the card's per-image token ceilings (`max_image_tokens`, one per kind of screenshot — the pushed activity set and the served pulls), realized by _within_ceiling;
 - every request streams (`stream_options.include_usage`) and is reassembled here into the same persisted record a non-streamed call would leave: content and reasoning deltas concatenated, tool-call deltas merged by index, usage from the terminal usage chunk. Streaming is what makes a long generation legible while it runs — the deltas are the run's progress, and the server serves one request at a time from admission to the end of its response;
 - that terminal usage chunk carries a `timings` sibling to `usage` (prompt/generation token rates and ms, cache hits, peak model memory) that the openai SDK does not model; it survives as `model_extra` and is folded into the persisted usage record — the local analogue of Gemini's usage breakdown. The response's `x-locus-request` header is folded in too (`server_request`): it is the id keying the server's per-request memory telemetry, so the persisted record names its own rows in the server's memory log.
 
-Config is stated, never defaulted: the conversation is constructed from a model card (cards.py) and sends the model, the thinking budget, and every sampling value explicitly on every request — thinking is the backend's one mode, and enable_thinking rides the wire as an explicit true rather than falling to an upstream default. The persisted payload is therefore the complete record of the generation intent — nothing the server applies is absent from it. Omitted fields would fall to upstream's own schema defaults (temperature 0.0 — greedy).
+Config is stated, never defaulted: the conversation is constructed from a model card (cards.py) and sends the model, the thinking budget, and every sampling value explicitly on every request — thinking is the backend's one mode, and enable_thinking rides the wire as an explicit true rather than falling to an upstream default. The persisted payload is therefore the complete record of the generation intent — nothing the server applies is absent from it. Omitted fields would fall to upstream's own defaults — the checkpoint's generation config, then upstream's schema.
 
 Payload persistence is inherited from the Conversation protocol layer — the record home is stated at construction (record_dir), never optional.
 """
@@ -184,6 +185,7 @@ class OpenAICompatConversation(Conversation):
             "extra_body": {
                 "enable_thinking": True,
                 "thinking_budget": self.thinking_budget,
+                "context_management": [],
             },
         }
         for key, value in self.sampling.items():
@@ -389,6 +391,7 @@ class OpenAICompatConversation(Conversation):
             "base_url": self.base_url,
             "enable_thinking": True,
             "thinking_budget": self.thinking_budget,
+            "context_management": [],
             "max_tokens": self.max_tokens,
             "context_tokens": self.context_tokens,
             **self.sampling,

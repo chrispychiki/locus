@@ -675,9 +675,9 @@ class TestPreprocessSerializer:
         assert in_flight["max"] == 1
 
 
-class TestUpstreamTopKTripwire:
-    def test_batched_sampler_still_lacks_top_k(self):
-        """When this fails, upstream's batched sampler grew beyond temperature/top_p/seed."""
+class TestUpstreamSamplerTripwire:
+    def test_batched_sampler_draws_from_exactly_the_claimed_fields(self):
+        """The cards may claim top_k and not min_p because upstream's batched sampler is built from temperature/top_p/top_k/seed alone. When this fails, re-verify SUPPORTED_SAMPLING (cards.py) against the new sampler."""
         import inspect
 
         from mlx_vlm.server.generation import _PositionedTargetSampler
@@ -685,7 +685,7 @@ class TestUpstreamTopKTripwire:
         params = set(
             inspect.signature(_PositionedTargetSampler.__init__).parameters
         ) - {"self"}
-        assert params == {"temperature", "top_p", "seed"}
+        assert params == {"temperature", "top_p", "top_k", "seed"}
 
 
 class TestThinkingBudgetDecodePipeline:

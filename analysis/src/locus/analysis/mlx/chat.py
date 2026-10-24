@@ -1,6 +1,6 @@
 """One-shot probe of the local MLX server: send a prompt, print the reply.
 
-The hand check that the server answers, that an image lands, that a schema comes back — one request, one exit. It is not how analysis calls the server: it sends no sampling, so every omitted field falls to upstream's own schema defaults, which makes it a view of raw upstream behavior. The model is whatever the server has loaded (asked once via /health) and stated explicitly in the request. Image paths anywhere in the prompt are sent as images (client and server share a filesystem). Target is the card's endpoint (sole_bind from the analysis card's base_url); LOCUS_MLX_URL overrides.
+The hand check that the server answers, that an image lands, that a schema comes back — one request, one exit. It is not how analysis calls the server: it sends no sampling, so every omitted field falls to upstream's own defaults (the checkpoint's generation config, then upstream's schema), which makes it a view of raw upstream behavior. It does send `context_management: []`, as every locus client does, so the prompt reaches the model as sent rather than compacted. The model is whatever the server has loaded (asked once via /health) and stated explicitly in the request. Image paths anywhere in the prompt are sent as images (client and server share a filesystem). Target is the card's endpoint (sole_bind from the analysis card's base_url); LOCUS_MLX_URL overrides.
 
 Usage:
     locus-mlx-chat --prompt "what is in /abs/path/image.png?"
@@ -100,7 +100,10 @@ def main() -> None:
             {"role": "user", "content": content},
         ],
         "stream": False,
-        "extra_body": {"enable_thinking": not args.no_think},
+        "extra_body": {
+            "enable_thinking": not args.no_think,
+            "context_management": [],
+        },
         "timeout": 21600,
     }
     if args.json_schema:
