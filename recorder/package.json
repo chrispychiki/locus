@@ -11,7 +11,7 @@
 	},
 	"dependencies": {
 		"@fingerprintjs/botd": "2.0.0",
-		"@rrweb/record": "2.1.1",
+		"@rrweb/record": "2.1.7",
 		"fflate": "^0.8.3"
 	},
 	"devDependencies": {

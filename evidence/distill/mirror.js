@@ -7,7 +7,7 @@
 // the screenshots the model grounds on come from that replayer: content it never painted must never enter the
 // projection, and content it left painted must.
 //
-// The line the mirror draws: it decodes the rrweb serialization format completely — rr_* specials, textarea value materialization, _cssText stylesheet materialization and rr_split re-splitting, the link-carrying-_cssText style retag, boolean/null attribute decoding, SVG tag-case restoration, shadow/iframe routing, quirks-mode doctype injection, the body-forced-last document rule — but it does not perform the replayer's browser-environment adaptations, which exist to make a live replay safe or paintable and change no content: script→noscript renaming, on*→_on* handler neutering, CSP/preload defusing, the postcss :hover/device-media CSS rewrites, and seek-time chrome (hover classes, rrweb-paused, injected style rules). Element state the replayer holds as DOM properties rather than attributes (input value/checked, scroll offsets, media state, canvas bitmaps) lives on node.props.
+// The line the mirror draws: it decodes the rrweb serialization format completely — rr_* specials, textarea value materialization, _cssText stylesheet materialization and rr_split re-splitting, the link-carrying-_cssText style retag, boolean/null attribute decoding, SVG tag-case restoration, shadow/iframe routing, quirks-mode doctype injection, the body-forced-last document rule — but it does not perform the replayer's browser-environment adaptations, which exist to make a live replay safe or paintable and change no content: script→noscript renaming, on*→_on* handler neutering, CSP/preload defusing, autocomplete="off" on rebuilt fields, the postcss :hover/device-media CSS rewrites, and seek-time chrome (hover classes, rrweb-paused, injected style rules). Element state the replayer holds as DOM properties rather than attributes (input value/checked, scroll offsets, media state, canvas bitmaps) lives on node.props.
 //
 // Not mirrored, by scope: CSSOM mutations (StyleSheetRule/StyleDeclaration/AdoptedStyleSheet — the style
 // *elements'* text is mirrored; constructed-sheet state is not), canvas drawing commands, media playback
@@ -568,6 +568,11 @@ export class LightweightMirror {
 	// when there are any (writing onto the serialized nodes, which the child build then materializes), else
 	// materializes as one unserialized text child. The mirror carries the recorded CSS verbatim — the
 	// replayer's postcss adaptation rewrites selectors for hover/media simulation, not content.
+	//
+	// The re-split applies the replayer's repair (applyCssSplits) of a recorder defect: a split can fall
+	// inside "0px", because the recorder matched the stylesheet's text after normalizing 0px to 0. A section
+	// ending "0p" whose successor starts with "x" takes the successor's text up to and including its first
+	// "}", the successor loses that text, and the repair repeats for each following section that has a "}".
 	_buildStyleText(node, sn, cssText) {
 		const textKids = (sn.childNodes || []).filter(
 			(c) => c.type === NodeType.Text,
@@ -577,9 +582,24 @@ export class LightweightMirror {
 			while (splits.length > 1 && splits.length > textKids.length) {
 				splits.splice(-2, 2, splits.slice(-2).join(""));
 			}
+			let errorOffset = -1;
 			for (let i = 0; i < textKids.length; i++) {
 				if (i === splits.length) break;
-				textKids[i].textContent = splits[i];
+				let section = splits[i];
+				const next = i < splits.length - 1 ? splits[i + 1] : null;
+				if (errorOffset !== -1) section = section.substring(errorOffset);
+				if (
+					next &&
+					(errorOffset !== -1 ||
+						(section.endsWith("0p") && next.startsWith("x")))
+				) {
+					errorOffset = next.indexOf("}");
+					if (errorOffset !== -1) {
+						errorOffset += 1;
+						section += next.substring(0, errorOffset);
+					}
+				}
+				textKids[i].textContent = section;
 			}
 		} else {
 			this._append(node, this._syntheticText(cssText, node.ownerDocument));

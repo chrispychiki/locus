@@ -108,6 +108,24 @@ test("style _cssText re-splits across serialized text children on rr_split marke
 	expect(kids[1].textContent).toBe(".b{}.c{}");
 });
 
+test("a re-split that landed inside 0px is repaired as the replayer repairs it, cascading", () => {
+	const m = mirrorWith([
+		el(
+			10,
+			"style",
+			{
+				_cssText: ".a{margin:0p/* rr_split */x}.b{color:red}/* rr_split */.c{}",
+			},
+			[txt(11, ""), txt(12, ""), txt(13, "")],
+		),
+	]);
+	expect(m.getNode(10).childNodes.map((c) => c.textContent)).toEqual([
+		".a{margin:0px}",
+		".b{color:red}.c{}",
+		"",
+	]);
+});
+
 test("a link carrying _cssText materializes as a style element", () => {
 	const m = mirrorWith([
 		el(10, "link", { rel: "stylesheet", href: "/x.css", _cssText: ".a{}" }),

@@ -1,4 +1,4 @@
-// Auto-generated from @rrweb/types@2.1.1 by distill/extract_rrweb_constants.js
+// Auto-generated from @rrweb/types@2.1.7 by distill/extract_rrweb_constants.js
 // DO NOT EDIT — regenerate with: bun distill/extract_rrweb_constants.js
 
 export const EventType = {
