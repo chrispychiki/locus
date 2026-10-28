@@ -2,6 +2,7 @@
 conversation = "openai-compatible"
 # The bundled mlx server reads `model`, `context_tokens`, and `base_url` at boot; an edit to them
 # while a server is resident takes effect only at its next boot.
+# Serving this model at this context takes a Mac with 64GB of memory.
 model = "mlx-community/Qwen3.6-35B-A3B-6bit"
 base_url = "http://127.0.0.1:8847/v1"
 family = "qwen3"

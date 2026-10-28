@@ -19,14 +19,13 @@ dependencies = [
 # runs; the entry points refuse loudly and name this extra (mlx/__init__.py).
 [project.optional-dependencies]
 mlx = [
-    # The floors name what the server relies on, not a preference. mlx-vlm 0.7.10 is the release
-    # this layer is validated against: its chat handler renders each image in the message, and at
-    # the position, that carried it, and its sampler honors a request's top_k, which the cards
-    # claim. It requires mlx 0.32.4, so the two floors move together. There is no ceiling because
-    # the lockfile already pins what installs: a newer mlx-vlm arrives only through a deliberate
-    # upgrade, and the upstream-keyed patches in serve.py and neighbors verify the source they
-    # stand in for at boot and refuse to serve on any other version (mlx/patching.py) — the
-    # upgrade is a re-validation event, never a silent behavior swap.
+    # The floors are what the server relies on. mlx-vlm 0.7.10 is the release this layer is
+    # validated against: its chat handler renders each image in the message that carried it, at
+    # its position, and its sampler honors a request's top_k, which the cards claim. It requires
+    # mlx 0.32.4, so the two floors move together. There is no ceiling because the lockfile pins
+    # what installs: a newer mlx-vlm arrives only through a deliberate upgrade, and the
+    # upstream-keyed patches verify the source they stand in for at boot and refuse to serve on
+    # any other version (mlx/patching.py).
     "mlx>=0.32.4; sys_platform == 'darwin'",
     "mlx-vlm>=0.7.10; sys_platform == 'darwin'",
     "uvicorn; sys_platform == 'darwin'",

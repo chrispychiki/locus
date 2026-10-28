@@ -15,7 +15,10 @@ Chunking is output-identical to the unchunked encode on the pinned upstream sour
 embedding, position-embedding interpolation, and the mergers are per-image (or per-token)
 operations concatenated across the batch; attention splits q/k/v at cu_seqlens and runs SDPA per
 image segment, so no information crosses image boundaries; and the rotary frequency table's rows
-are position-indexed values independent of the batch-max table height.
+are position-indexed values independent of the batch-max table height. A chunk's patch rows are
+sliced at offsets computed from grid_thw: mlx-vlm's own image processor (Qwen3VLImageProcessor)
+emits both, t*h*w rows per image in grid order, and upstream's encoder splits the rows by that
+same grid.
 
 That independence is a property of the exact upstream source, so the patch is keyed to it: when
 the installed mlx-vlm's VisionModel.__call__ no longer hashes to the pinned version, the server
@@ -25,10 +28,7 @@ server path and the vision-feature-cache path both (the cache stores this functi
 which chunking does not change).
 """
 
-import logging
 import os
-
-logger = logging.getLogger("locus.analysis.mlx.vision_chunking")
 
 DEFAULT_CHUNK_MPX = 16.0
 
@@ -92,14 +92,8 @@ def install_vision_encode_chunking(budget_mpx: float | None = None) -> None:
         if len(groups) == 1:
             return original(self, hidden_states, grid_thw, **kwargs)
 
-        patches = [t * h * w for t, h, w in rows]
-        if hidden_states.shape[0] != sum(patches):
-            logger.warning(
-                f"vision-encode chunking skipped for this call: {hidden_states.shape[0]} patch rows != {sum(patches)} expected from grid_thw — the patch-row layout differs from the pinned upstream's; encoding unchunked"
-            )
-            return original(self, hidden_states, grid_thw, **kwargs)
         offsets = [0]
-        for count in patches:
+        for count in (t * h * w for t, h, w in rows):
             offsets.append(offsets[-1] + count)
 
         merged_parts, deep_parts = [], []

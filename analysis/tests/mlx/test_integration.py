@@ -34,7 +34,7 @@ COLORS = {
 
 def server_up() -> bool:
     try:
-        return requests.get(f"{SERVER}/docs", timeout=2).status_code == 200
+        return requests.get(f"{SERVER}/health", timeout=2).status_code == 200
     except requests.RequestException:
         return False
 

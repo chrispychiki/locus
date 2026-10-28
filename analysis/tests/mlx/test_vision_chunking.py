@@ -160,23 +160,3 @@ class TestOutputIdentity:
 
         assert mx.allclose(merged, merged_ref, atol=1e-6, rtol=1e-6)
         assert len(deep) == len(deep_ref)
-
-    def test_layout_mismatch_warns_and_delegates_instead_of_slicing(self, caplog):
-        """The chunker slices hidden_states at offsets computed from grid_thw, an arithmetic the hash pin does not protect (it pins __call__, not the callers' patch-row layout). On a mismatch the patched call must warn and hand the untouched inputs to upstream — silently slicing by wrong offsets would scramble features. The bar is behaving exactly as the unchunked encode does on the same inputs, whatever that behavior is."""
-        model = tiny_vision_model()
-        rows = [(1, 4, 4), (1, 4, 4)]
-        pixels, grid = patch_input(rows, seed=11)
-        extra = mx.concatenate([pixels, mx.zeros((16, pixels.shape[1]))], axis=0)
-
-        def outcome(call):
-            try:
-                merged, deep = call()
-                mx.eval(merged, *deep)
-                return ("ok", merged.shape, [d.shape for d in deep])
-            except Exception as exc:  # noqa: BLE001 — the outcome, not a swallow
-                return ("raise", type(exc))
-
-        reference = outcome(lambda: VisionModel.__call__(model, extra, grid))
-        install_vision_encode_chunking(budget_mpx=4 * 4 * PATCH_PIXELS / 1e6)
-        assert outcome(lambda: model(extra, grid)) == reference
-        assert "chunking skipped" in caplog.text

@@ -115,6 +115,26 @@ class TestTelemetryMiddleware:
         run_asgi(TelemetryMiddleware(inner), http_scope(), [])
         assert order == ["end", "clear"]
 
+    def test_the_peak_is_reset_before_the_bracket_opens(self, monkeypatch):
+        """Every reader of a request's peak — its start snapshot, the serve-log line, upstream's timings — reads mlx's peak since this reset, so the peak is the request's own."""
+        import mlx.core as mx
+
+        order = []
+        monkeypatch.setattr(mx, "reset_peak_memory", lambda: order.append("reset"))
+        original_init = FakeTelemetry.__init__
+
+        def spying_init(self, request_id):
+            order.append("start")
+            original_init(self, request_id)
+
+        monkeypatch.setattr(FakeTelemetry, "__init__", spying_init)
+
+        async def inner(scope, receive, send):
+            order.append("inner")
+
+        run_asgi(TelemetryMiddleware(inner), http_scope(), [])
+        assert order == ["reset", "start", "inner"]
+
     def test_response_carries_the_telemetry_request_id(self):
         async def inner(scope, receive, send):
             await send(
@@ -200,6 +220,37 @@ class TestHealthMemoryMiddleware:
         )
         assert payload["status"] == "healthy"
         assert "vm_stat unavailable" in payload["memory"]["error"]
+
+    @pytest.mark.parametrize(
+        ("body", "carried"),
+        [
+            (b"  Internal Server Error\n", "Internal Server Error"),
+            (b'["not", "an object"]', '["not", "an object"]'),
+        ],
+    )
+    def test_an_upstream_body_that_is_not_a_json_object_is_carried_under_its_status(
+        self, body, carried
+    ):
+        async def inner(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [(b"content-type", b"text/plain")],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+
+        sent = run_asgi(
+            HealthMemoryMiddleware(inner, admission=Admission()),
+            http_scope(method="GET", path="/health"),
+            [],
+        )
+        status, payload = response_of(sent)
+        assert status == 500
+        assert payload["upstream_error"] == carried
+        assert payload["memory"] == {"mlx_active_gib": 27.0}
+        assert payload["admission"] == {"running": 0, "waiting": 0}
 
     def test_non_health_passes_through_untouched(self):
         seen = []
@@ -340,44 +391,282 @@ class TestWiredCap:
 
 
 class TestGeneratingRoutes:
-    """Admission must cover every route that submits a prompt to upstream's generator — not
-    just the one analysis happens to call — and must leave the metadata, tokenizer, and control
-    routes beside them free, since a tokenizer read that queued behind a prefill would be a lie
-    about what admission is for."""
+    """Admission covers chat completions, the one served route that reaches upstream's generator, and leaves the reads beside it free: a /health that queued behind a prefill could not tell a caller in line where it stands."""
 
     @pytest.mark.parametrize(
-        "path",
-        [
-            "/v1/chat/completions",
-            "/chat/completions",
-            "/v1/responses",
-            "/responses",
-            "/v1/messages",
-            "/messages",
-        ],
+        "path", ["/v1/chat/completions", "/chat/completions", "/v1/chat/completions/"]
     )
-    def test_generating_routes_gated(self, path):
+    def test_chat_completions_gated(self, path):
         assert serve.generating(http_scope(path=path))
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "/health",
-            "/v1/models",
-            "/metrics",
-            "/v1/cache/stats",
-            "/unload",
-            "/v1/messages/count_tokens",
-            "/v1/responses/input_tokens",
-            "/v1/responses/resp_123",
-            "/v1/responses/resp_123/cancel",
-        ],
-    )
-    def test_non_generating_routes_free(self, path):
+    @pytest.mark.parametrize("path", ["/health", "/v1/models", "/models"])
+    def test_served_reads_free(self, path):
         assert not serve.generating(http_scope(path=path))
 
     def test_lifespan_scope_is_not_a_request(self):
         assert not serve.generating({"type": "lifespan"})
+
+
+SERVED = "mlx-community/Served-Model"
+
+
+def json_response(status, payload):
+    """An inner app answering with one JSON body, the way upstream's handlers do."""
+    import json
+
+    async def inner(scope, receive, send):
+        body = json.dumps(payload).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    return inner
+
+
+def response_of(sent):
+    import json
+
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+    assert dict(start["headers"])[b"content-length"] == str(len(body)).encode()
+    return start["status"], json.loads(body)
+
+
+def chat_body(**fields):
+    import json
+
+    return json.dumps({"model": SERVED, "messages": [], **fields}).encode()
+
+
+class TestServedOnly:
+    """Upstream swaps its resident weights for whatever model a request names and serves routes nothing here calls, so the server answers only for the model it booted, on the routes its clients use."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/embeddings",
+            "/v1/rerank",
+            "/metrics",
+            "/v1/cache/reset",
+            "/v1/settings",
+            "/unload",
+            "/v1/images/defaults",
+            "/a/route/upstream/adds/later",
+            "/",
+            "/v1/health",
+            "/v1/v1/chat/completions",
+            "/v1/chat/completions/extra",
+        ],
+    )
+    def test_every_other_route_is_refused_naming_what_is_served(self, path):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(scope["path"])
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED), http_scope(path=path), []
+        )
+        status, payload = response_of(sent)
+        assert reached == []
+        assert status == 404
+        assert SERVED in payload["detail"] and path in payload["detail"]
+        assert "/v1/chat/completions" in payload["detail"]
+
+    def test_a_websocket_is_refused(self):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(scope)
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            {"type": "websocket", "path": "/v1/realtime"},
+            [],
+        )
+        assert reached == []
+        ((close),) = sent
+        assert close["type"] == "websocket.close" and SERVED in close["reason"]
+
+    def test_lifespan_passes(self):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(scope["type"])
+
+        run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED), {"type": "lifespan"}, []
+        )
+        assert reached == ["lifespan"]
+
+    @pytest.mark.parametrize("path", ["/health", "/v1/chat/completions"])
+    def test_served_routes_reach_upstream(self, path):
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(json_response(200, {"ok": True}), served=SERVED),
+            http_scope(path=path),
+            [{"type": "http.request", "body": chat_body()}],
+        )
+        assert response_of(sent) == (200, {"ok": True})
+
+    def test_a_chat_request_reaches_upstream_whole_and_still_hears_a_disconnect(self):
+        """The body is read whole to check it, then handed on as one message; what follows on the socket — the disconnect admission watches for — still reaches the app."""
+        heard = []
+
+        async def inner(scope, receive, send):
+            heard.append(await receive())
+            heard.append(await receive())
+
+        body = chat_body(max_tokens=4)
+        run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [
+                {"type": "http.request", "body": body[:10], "more_body": True},
+                {"type": "http.request", "body": body[10:], "more_body": False},
+                {"type": "http.disconnect"},
+            ],
+        )
+        assert heard == [
+            {"type": "http.request", "body": body, "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+
+    @pytest.mark.parametrize(
+        "fields",
+        [{"model": "mlx-community/Other"}, {"model": None}, {"model": SERVED.lower()}],
+    )
+    def test_a_request_for_another_model_is_refused(self, fields):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(True)
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": chat_body(**fields)}],
+        )
+        status, payload = response_of(sent)
+        assert reached == []
+        assert status == 400
+        assert (
+            SERVED in payload["detail"] and repr(fields["model"]) in payload["detail"]
+        )
+
+    def test_a_request_without_a_model_is_refused(self):
+        import json
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(json_response(200, {}), served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": json.dumps({"messages": []}).encode()}],
+        )
+        status, payload = response_of(sent)
+        assert status == 400 and SERVED in payload["detail"]
+
+    def test_an_adapter_is_refused(self):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(True)
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": chat_body(adapter_path="/tmp/lora")}],
+        )
+        status, payload = response_of(sent)
+        assert reached == []
+        assert status == 400
+        assert SERVED in payload["detail"] and "/tmp/lora" in payload["detail"]
+
+    def test_an_explicit_null_adapter_is_the_served_model(self):
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(json_response(200, {"ok": True}), served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": chat_body(adapter_path=None)}],
+        )
+        assert response_of(sent) == (200, {"ok": True})
+
+    def test_a_body_that_is_not_a_json_object_is_upstreams_to_answer(self):
+        heard = []
+
+        async def inner(scope, receive, send):
+            heard.append((await receive())["body"])
+
+        run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": b"not json"}],
+        )
+        assert heard == [b"not json"]
+
+    def test_a_caller_gone_before_its_body_arrived_reaches_nothing(self):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(True)
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [
+                {"type": "http.request", "body": b'{"mod', "more_body": True},
+                {"type": "http.disconnect"},
+            ],
+        )
+        assert reached == [] and sent == []
+
+    @pytest.mark.parametrize("path", ["/v1/models", "/models"])
+    def test_the_model_list_lists_the_served_model_alone(self, path):
+        listing = {
+            "object": "list",
+            "data": [
+                {"id": "mlx-community/Other", "object": "model"},
+                {"id": SERVED, "object": "model", "loaded": True},
+                {"id": "some/local/dir", "object": "model"},
+            ],
+        }
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(json_response(200, listing), served=SERVED),
+            http_scope(method="GET", path=path),
+            [],
+        )
+        assert response_of(sent) == (
+            200,
+            {
+                "object": "list",
+                "data": [{"id": SERVED, "object": "model", "loaded": True}],
+            },
+        )
+
+    def test_a_model_list_error_passes_through(self):
+        async def inner(scope, receive, send):
+            await send({"type": "http.response.start", "status": 500, "headers": []})
+            await send({"type": "http.response.body", "body": b"Internal Server Error"})
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(method="GET", path="/v1/models"),
+            [],
+        )
+        assert sent == [
+            {"type": "http.response.start", "status": 500, "headers": []},
+            {"type": "http.response.body", "body": b"Internal Server Error"},
+        ]
 
 
 async def _stays():
@@ -673,6 +962,260 @@ class TestPreprocessSerializer:
         install_preprocess_serializer()
         storm()
         assert in_flight["max"] == 1
+
+
+class TestPixelRelease:
+    def test_pixel_arrays_leave_the_inputs_once_encoded(self, monkeypatch):
+        import mlx.core as mx
+        from locus.analysis.mlx import patching
+        from locus.analysis.mlx.serve import install_pixel_release
+        from mlx_vlm.server import generation
+
+        seen = {}
+
+        def encode(self, raw_inputs, images=None, apc_semantic_hash=None):
+            seen["pixels_at_encode"] = "pixel_values" in raw_inputs
+            return raw_inputs["input_ids"], {"inputs_embeds": mx.zeros((1, 2, 4))}
+
+        # The stand-in encode has its own source, so the pin is lifted for it; the pin
+        # itself is the drift test's subject.
+        monkeypatch.setattr(patching, "expect_source", lambda *a, **k: None)
+        monkeypatch.setattr(generation.ResponseGenerator, "_gpu_embed", encode)
+        install_pixel_release()
+
+        raw_inputs = {
+            "input_ids": mx.array([[1, 2]]),
+            "pixel_values": mx.zeros((8, 4)),
+            "pixel_values_videos": mx.zeros((8, 4)),
+            "image_grid_thw": mx.array([[1, 2, 2]]),
+        }
+        dummy = object.__new__(generation.ResponseGenerator)
+        _, gen_kwargs = generation.ResponseGenerator._gpu_embed(dummy, raw_inputs, None)
+
+        assert seen["pixels_at_encode"]
+        assert set(raw_inputs) == {"input_ids", "image_grid_thw"}
+        assert "inputs_embeds" in gen_kwargs
+
+    def test_refuses_boot_on_upstream_source_drift(self, monkeypatch):
+        from locus.analysis.mlx import serve
+        from mlx_vlm.server import generation
+
+        monkeypatch.setattr(serve, "EXPECTED_GPU_EMBED_SHA256", "0" * 64)
+        before = generation.ResponseGenerator._gpu_embed
+        with pytest.raises(SystemExit, match="upstream drift"):
+            serve.install_pixel_release()
+        assert generation.ResponseGenerator._gpu_embed is before
+
+
+class TestGpuTracking:
+    @pytest.fixture(autouse=True)
+    def restore_upstream(self):
+        from mlx_vlm.server import generation
+
+        request_class = generation.QueuedGenerationRequest
+        generate = generation.ResponseGenerator.generate
+        yield
+        generation.QueuedGenerationRequest = request_class
+        generation.ResponseGenerator.generate = generate
+
+    @staticmethod
+    def _install(monkeypatch, admission, generate):
+        """Track a stand-in for upstream's generate: it has its own source, so the pin is lifted for it; the pin itself is the drift test's subject."""
+        from locus.analysis.mlx import patching
+        from mlx_vlm.server import generation
+
+        monkeypatch.setattr(patching, "expect_source", lambda *a, **k: None)
+        monkeypatch.setattr(generation.ResponseGenerator, "generate", generate)
+        serve.install_gpu_tracking(admission)
+        return object.__new__(generation.ResponseGenerator)
+
+    def test_a_request_counts_from_generate_to_its_first_terminal_message(
+        self, monkeypatch
+    ):
+        from queue import Queue
+
+        from mlx_vlm.server import generation
+
+        admission = Admission()
+        seen = {}
+
+        def generate(self, prompt):
+            seen["while_preprocessing"] = admission._in_gpu
+            rqueue = Queue()
+            seen["request"] = generation.QueuedGenerationRequest(
+                rqueue=rqueue, raw_inputs={}, prompt_tokens=1, args=None
+            )
+            return rqueue
+
+        worker = self._install(monkeypatch, admission, generate)
+        rqueue = generation.ResponseGenerator.generate(worker, "prompt")
+        assert seen["while_preprocessing"] == 1, (
+            "counted from the start of generate, before any request is built"
+        )
+        assert admission._in_gpu == 1, "still counted once generate has queued it"
+
+        request = seen["request"]
+        request.rqueue.put(generation.GenerationContext(uid=0, prompt_tokens=1))
+        request.rqueue.put("a token")
+        assert admission._in_gpu == 1, "context and tokens are not the end"
+
+        request.rqueue.put(None)
+        assert admission._in_gpu == 0
+        request.rqueue.put(None)
+        assert admission._in_gpu == 0, "a second terminal message is not a second drop"
+        assert [rqueue.get_nowait() for _ in range(4)][-2:] == [None, None], (
+            "every message still reaches the caller"
+        )
+
+    def test_generate_raising_before_it_builds_a_request_counts_nothing(
+        self, monkeypatch
+    ):
+        admission = Admission()
+
+        def generate(self, prompt):
+            raise ValueError("prompt too long")
+
+        worker = self._install(monkeypatch, admission, generate)
+        from mlx_vlm.server import generation
+
+        with pytest.raises(ValueError, match="prompt too long"):
+            generation.ResponseGenerator.generate(worker, "prompt")
+        assert admission._in_gpu == 0
+
+    def test_a_failure_the_loop_reports_drops_the_request_once(self, monkeypatch):
+        """The loop's insert failure puts the exception on the rqueue, and generate re-raises it to the caller: the request leaves the count once, by its terminal message."""
+        from queue import Queue
+
+        from mlx_vlm.server import generation
+
+        admission = Admission()
+
+        def generate(self, prompt):
+            rqueue = Queue()
+            request = generation.QueuedGenerationRequest(
+                rqueue=rqueue, raw_inputs={}, prompt_tokens=1, args=None
+            )
+            request.rqueue.put(RuntimeError("insert failed"))
+            raise rqueue.get_nowait()
+
+        worker = self._install(monkeypatch, admission, generate)
+        with pytest.raises(RuntimeError, match="insert failed"):
+            generation.ResponseGenerator.generate(worker, "prompt")
+        assert admission._in_gpu == 0
+
+    def test_the_loops_error_path_drops_the_request_once(self, monkeypatch):
+        from queue import Queue
+
+        from mlx_vlm.server import generation
+
+        admission = Admission()
+        built = []
+
+        def generate(self, prompt):
+            built.append(
+                generation.QueuedGenerationRequest(
+                    rqueue=Queue(), raw_inputs={}, prompt_tokens=1, args=None
+                )
+            )
+
+        worker = self._install(monkeypatch, admission, generate)
+        generation.ResponseGenerator.generate(worker, "a")
+        generation.ResponseGenerator.generate(worker, "b")
+        assert admission._in_gpu == 2
+
+        first, second = built
+        first.rqueue.put(RuntimeError("step failed"))
+        first.rqueue.put(None)
+        assert admission._in_gpu == 1, "the error path sends the exception, then None"
+        second.rqueue.put(None)
+        assert admission._in_gpu == 0
+
+    def test_refuses_boot_on_upstream_source_drift(self, monkeypatch):
+        from mlx_vlm.server import generation
+
+        monkeypatch.setitem(
+            serve.EXPECTED_GPU_LIFECYCLE_SHA256, "ResponseGenerator._step", "0" * 64
+        )
+        before = generation.QueuedGenerationRequest
+        with pytest.raises(SystemExit, match="upstream drift"):
+            serve.install_gpu_tracking(Admission())
+        assert generation.QueuedGenerationRequest is before
+
+    def test_the_slot_waits_out_a_request_the_gpu_still_holds(self):
+        """The response ends — a caller disconnected — while the GPU loop still works on the request: the next request is admitted only when the loop drops it, signalled from the loop's own thread."""
+        import threading
+
+        admission = Admission()
+        events = []
+
+        async def inner(scope, receive, send):
+            events.append((scope["name"], "enter"))
+            if scope["name"] == "dead":
+                admission.entered_gpu()
+
+        middleware = AdmissionMiddleware(inner, admission)
+
+        async def noop_send(message):
+            pass
+
+        async def storm():
+            dead = asyncio.create_task(
+                middleware({**CHAT, "name": "dead"}, _stays, noop_send)
+            )
+            await asyncio.sleep(0.01)
+            nxt = asyncio.create_task(
+                middleware({**CHAT, "name": "next"}, _stays, noop_send)
+            )
+            await asyncio.sleep(0.05)
+            assert events == [("dead", "enter")], "the next request is not admitted"
+            assert not dead.done(), "the dead request's slot is held"
+            assert admission.state() == {"running": 1, "waiting": 1}
+            gpu = threading.Thread(target=admission.left_gpu)
+            gpu.start()
+            gpu.join()
+            await asyncio.gather(dead, nxt)
+
+        asyncio.run(storm())
+        assert events == [("dead", "enter"), ("next", "enter")]
+        assert admission.state() == {"running": 0, "waiting": 0}
+
+    def test_the_slot_frees_at_once_when_the_gpu_holds_nothing(self):
+        admission = Admission()
+        middleware = AdmissionMiddleware(lambda s, r, x: asyncio.sleep(0), admission)
+
+        async def noop_send(message):
+            pass
+
+        async def run():
+            await asyncio.wait_for(middleware(CHAT, _stays, noop_send), 1)
+
+        asyncio.run(run())
+        assert not middleware.slot.locked()
+
+    def test_a_cancelled_drain_still_frees_the_slot(self):
+        """The server shutting down cancels a request whose slot is waiting on the GPU: the slot is released, never orphaned."""
+        admission = Admission()
+        admission.entered_gpu()
+
+        async def inner(scope, receive, send):
+            pass
+
+        middleware = AdmissionMiddleware(inner, admission)
+
+        async def noop_send(message):
+            pass
+
+        async def run():
+            task = asyncio.create_task(middleware(CHAT, _stays, noop_send))
+            await asyncio.sleep(0.02)
+            assert middleware.slot.locked()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not middleware.slot.locked()
+
+        asyncio.run(run())
+        assert admission.state() == {"running": 0, "waiting": 0}
 
 
 class TestUpstreamSamplerTripwire:
