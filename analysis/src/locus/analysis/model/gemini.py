@@ -27,6 +27,12 @@ PROTECTED_AGE_S = 2 * 3600
 MAX_STORAGE_BYTES = 19 * 1024**3
 UPLOAD_TIMEOUT_S = 300
 UPLOAD_CONCURRENCY = 16
+# countTokens calls in flight at once — the bound on open connections the upload pool holds
+# itself to; a report counting more sets than this queues the rest a round trip behind.
+COUNT_CONCURRENCY = UPLOAD_CONCURRENCY
+# How every call to the API retries transient failures (429s, 5xx, timeouts): the SDK's own
+# exponential backoff, its waits narrated (_narrate_retries).
+RETRY = {"initial_delay": 10, "jitter": 30, "attempts": 10}
 
 
 def _literal_values(union) -> tuple[str, ...]:
@@ -133,11 +139,24 @@ def count_text_tokens(model: str, texts: list[str]) -> int:
     """Exact prompt-token count of text parts from Gemini's own countTokens — free, no generation. The parts are sent as one user content mirroring how composition sends them, so the count is the wire's own arithmetic, not an estimate. Images are deliberately absent: their cost is flat per image within a tier, so callers add image_tier_tokens instead of uploading anything."""
     from google.genai import types
 
-    client = _client()
+    _narrate_retries()
+    client = _client(
+        http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(**RETRY))
+    )
     content = types.Content(
         role="user", parts=[types.Part.from_text(text=t) for t in texts if t]
     )
     return client.models.count_tokens(model=model, contents=[content]).total_tokens
+
+
+def count_texts(model: str, payloads: list[list[str]]) -> list[int]:
+    """count_text_tokens over many payloads at once, one countTokens call each, all in flight together (COUNT_CONCURRENCY at a time): each call is one short round trip, so a price report's sets cost about one round trip, not one per set. Counts come back in the payloads' order; each call retries transient failures (RETRY), and one that still fails fails the whole count."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not payloads:
+        return []
+    with ThreadPoolExecutor(max_workers=min(COUNT_CONCURRENCY, len(payloads))) as pool:
+        return list(pool.map(lambda texts: count_text_tokens(model, texts), payloads))
 
 
 _CACHE_SCHEMA = """
@@ -310,9 +329,7 @@ class GeminiConversation(Conversation):
         self.client = _client(
             http_options=types.HttpOptions(
                 timeout=timeout_ms,
-                retry_options=types.HttpRetryOptions(
-                    initial_delay=10, jitter=30, attempts=10
-                ),
+                retry_options=types.HttpRetryOptions(**RETRY),
             )
         )
         self.cache = UploadCache(
@@ -353,11 +370,11 @@ class GeminiConversation(Conversation):
     def image_tokens(self, image_path: str) -> int:
         return image_tier_tokens(self.media_resolution.get("pulled_screenshots"))
 
-    def context_remaining(self) -> int:
-        """Generation claims nothing from the input context on this path, so the whole remainder is the conversation's to spend beyond what it carries: the model's context minus the last response's usage total — the wire's own count of everything the conversation held through that reply, persisted in its meta.json — minus the priced delta of parts appended since it (tool-result text at countTokens' free arithmetic, served screenshots at the pulled_screenshots tier's flat price)."""
+    def context_remaining(self, appending=()) -> int:
+        """Generation claims nothing from the input context on this path, so the whole remainder is the conversation's to spend beyond what it carries: the model's context minus the last response's usage total — the wire's own count of everything the conversation held through that reply, persisted in its meta.json — minus the priced delta of parts appended since it and of `appending` (tool-result text at countTokens' free arithmetic, served screenshots at the pulled_screenshots tier's flat price)."""
         from .cards import context_tokens
 
-        return context_tokens(self.model) - self._wire_anchored_used()
+        return context_tokens(self.model) - self._wire_anchored_used(appending)
 
     def _billing(self) -> dict:
         return {"model": self.model, "model_id": self.model_id, "prices": self.prices}

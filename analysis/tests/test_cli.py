@@ -8,7 +8,7 @@ import pytest
 from _analysis_support import (
     GEMINI,
     horizon_at,
-    install_offline_tokenizer,
+    install_offline_count,
 )
 from _support import (
     DISTILL,
@@ -32,8 +32,8 @@ from locus.evidence.db import connect
 
 
 @pytest.fixture(autouse=True)
-def offline_tokenizer(monkeypatch):
-    install_offline_tokenizer(monkeypatch)
+def offline_count(monkeypatch):
+    install_offline_count(monkeypatch)
     # The suite's deployment is the test's tmp_path, never this machine: no
     # banked key may leak in (a real key would let a Gemini card construct
     # and spend), and main()'s env self-serve walks cwd upward, which would
@@ -212,9 +212,6 @@ def test_cli_status_select_and_open_materialization(tmp_path, capsys, monkeypatc
     assert price["n_activity_screenshots"] > 0 and turn1["text_tokens"] > 0
     assert 0 < turn1["context_pct"] <= 100
     assert len(price["per_slice"]) == 2
-    assert turn1["verified"] is False, (
-        "the local instrument is the exact one — nothing separate to verify"
-    )
 
     main(
         [

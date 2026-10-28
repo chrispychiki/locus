@@ -1364,3 +1364,23 @@ class TestCardDerivation:
         sole = sole_bind()
         for slug in tomllib.loads(MODELS_TOML.read_text()):
             assert bind_for(slug) == sole
+
+
+def test_the_boot_refuses_a_count_setting_only_its_shell_holds(monkeypatch):
+    """A count-affecting variable the server would inherit but models.toml does not declare refuses the boot before anything is loaded: pricing counts with the declared serving env alone, so the server would count differently from every price. A declared one is the declaration's, and boots."""
+    from locus.analysis.mlx import serve
+
+    slug = "qwen3.6-35b-a3b-6bit"
+    monkeypatch.setenv("MLX_VLM_ENABLE_THINKING", "0")
+    assert serve.undeclared_count_env(slug) == [], "declared: the declaration wins"
+
+    monkeypatch.setenv("MLX_VLM_MAX_PIXELS", "65536")
+    monkeypatch.setattr(serve, "install_log_handler", lambda: None)
+
+    def loaded(*args, **kwargs):
+        raise AssertionError("the boot went past the refusal")
+
+    monkeypatch.setattr(serve, "_wired_cap_bytes", loaded)
+    monkeypatch.setattr(serve.sys, "argv", ["locus-mlx-serve", slug])
+    with pytest.raises(SystemExit, match="MLX_VLM_MAX_PIXELS set in the environment"):
+        serve.main()

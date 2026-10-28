@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from _analysis_support import (
     GEMINI,
-    install_offline_tokenizer,
+    install_offline_count,
 )
 from locus.analysis.model import Conversation
 from locus.analysis.model.cards import SUPPORTED_SAMPLING, load_card, thinking_levels
@@ -27,7 +27,7 @@ def keys(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def offline_pricing(monkeypatch):
-    install_offline_tokenizer(monkeypatch)
+    install_offline_count(monkeypatch)
 
 
 def test_factory_dispatch(tmp_path):
@@ -228,7 +228,7 @@ class RecordedConversation(Conversation):
     def image_tokens(self, image_path):
         return 1
 
-    def context_remaining(self):
+    def context_remaining(self, appending=()):
         return 1_000
 
     def _add_tool_result(self, call_id, content):
@@ -422,7 +422,7 @@ def test_wire_boundary_counts_images_in_tokens(tmp_path):
 
 
 def test_the_card_ceiling_shrinks_an_oversized_screenshot_to_budget(tmp_path):
-    from locus.analysis.budget import qwen_image_tokens
+    from _analysis_support import offline_image_tokens
     from PIL import Image
 
     image = tmp_path / "screenshot.png"
@@ -437,13 +437,13 @@ def test_the_card_ceiling_shrinks_an_oversized_screenshot_to_budget(tmp_path):
     sent = conversation.contents[0]["content"][0]["image_url"]["url"]
     assert sent != str(image.resolve()), "the server is handed a smaller file"
     with Image.open(sent) as shrunk:
-        cost = qwen_image_tokens(*shrunk.size)
+        cost = offline_image_tokens(None, *shrunk.size)
     assert cost <= ceiling, "the card's ceiling is a hard per-image bound"
     assert cost > ceiling * 0.9, "the resize lands near the ceiling, not far under"
 
 
 def test_a_pull_rides_under_its_own_ceiling_and_is_priced_so(tmp_path):
-    from locus.analysis.budget import qwen_image_tokens
+    from _analysis_support import offline_image_tokens
     from PIL import Image
 
     image = tmp_path / "pull.png"
@@ -460,7 +460,7 @@ def test_a_pull_rides_under_its_own_ceiling_and_is_priced_so(tmp_path):
     sent = conversation.contents[0]["content"][0]["image_url"]["url"]
     assert sent != str(image.resolve()), "over the pull ceiling, a smaller file"
     with Image.open(sent) as shrunk:
-        assert qwen_image_tokens(*shrunk.size) == cost, "priced as sent"
+        assert offline_image_tokens(None, *shrunk.size) == cost, "priced as sent"
     assert activity < cost <= pulled, "a pull rides under its own, higher ceiling"
 
 
@@ -509,10 +509,10 @@ def test_a_screenshot_under_the_ceiling_passes_untouched(tmp_path):
 
 
 def test_local_cards_declare_family_image_ceiling_and_endpoint():
-    # The counting/resize arithmetic (pinned tokenizer, smart_resize closed
-    # form) is one family's; a card states its membership and its per-image
-    # ceiling so neither is ever an unstated assumption. The endpoint is the
-    # card's too — the one home analysis dials and the server binds.
+    # The server's memory bounds patch one family's modules; a card states its
+    # membership and its per-image ceiling so neither is ever an unstated
+    # assumption. The endpoint is the card's too: analysis dials it and the
+    # server binds it.
     from locus.analysis.model.cards import SUPPORTED_FAMILIES
 
     card = load_card("qwen3.6-35b-a3b-6bit")
@@ -533,7 +533,41 @@ def test_local_cards_declare_family_image_ceiling_and_endpoint():
     assert parsed.hostname and parsed.port
 
 
-def test_a_card_outside_the_arithmetic_family_is_refused(tmp_path, monkeypatch):
+def test_a_relative_model_directory_is_the_deployment_roots(tmp_path, monkeypatch):
+    """A card naming a local directory by relative path names it under the deployment root its roster lives in, whatever the working directory — the one reading the server boots from and the count resolves by; a name no directory answers to is a Hub repo id, as upstream reads it."""
+    from locus.analysis.mlx import serve
+    from locus.analysis.model import cards
+
+    root = tmp_path / "deployment"
+    (root / "models" / "local-qwen").mkdir(parents=True)
+    roster = root / "config" / "cards"
+    roster.mkdir(parents=True)
+    body = (
+        'conversation = "openai-compatible"\n'
+        'base_url = "http://127.0.0.1:9/v1"\n'
+        'family = "qwen3"\n'
+        "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+        "thinking_budget = 1\nmax_tokens = 1\ncontext_tokens = 1000\nheadroom = 0.8\n"
+        "[sampling]\ntemperature = 1.0\n"
+    )
+    (roster / "local.toml").write_text(f'model = "models/local-qwen"\n{body}')
+    (roster / "hub.toml").write_text(f'model = "someone/hub-qwen"\n{body}')
+    monkeypatch.setattr(cards, "cards_dir", lambda: roster)
+    monkeypatch.chdir(tmp_path)
+
+    local = str(root / "models" / "local-qwen")
+    assert load_card("local")["model"] == local
+    assert cards.model_id("local") == local, "every reader takes the resolved model"
+    assert load_card("hub")["model"] == "someone/hub-qwen"
+    monkeypatch.setattr(serve, "card_file", lambda slug: roster / f"{slug}.toml")
+    assert serve._card("local")["model"] == local, "the server reads the same model"
+
+    (roster / "again.toml").write_text(f'model = "{local}"\n{body}')
+    with pytest.raises(ValueError, match="same model"):
+        load_card("local")
+
+
+def test_a_card_outside_the_served_family_is_refused(tmp_path, monkeypatch):
 
     from _analysis_support import card_roster
 
@@ -1133,94 +1167,103 @@ def test_a_tool_call_is_answered_exactly_once(tmp_path):
         conversation.add_tool_result("call_a", "rendered again")
 
 
-def test_the_context_left_anchors_on_the_last_responses_usage(tmp_path):
+def _reply(text):
+    return [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+        {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    ]
+
+
+TOOL = {"name": "a_tool", "description": "four words of declaration"}
+
+
+def test_the_context_left_is_the_servers_count_of_the_conversation(tmp_path):
+    """What the context still holds is the server's own count of the conversation as it stands, sent the way its last call was sent — so it is known before any response, it counts the reply the conversation now carries and the tool declarations the next call repeats, and what is appended takes away exactly what it costs."""
+    from locus.analysis.mlx import count
     from PIL import Image
 
     image = tmp_path / "screenshot.png"
     Image.new("RGB", (320, 200)).save(image)
-
     conversation = _streaming_conversation(
-        record_dir=tmp_path / "r",
-        chunks=[
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": "seen"},
-                        "finish_reason": "stop",
-                    }
-                ]
-            },
-            {
-                "usage": {
-                    "prompt_tokens": 9000,
-                    "completion_tokens": 1000,
-                    "total_tokens": 10000,
-                }
-            },
-        ],
+        record_dir=tmp_path / "r", chunks=_reply("two words")
     )
-    conversation.add_user_text("q")
-    with pytest.raises(RuntimeError, match="no response has been received"):
-        conversation.context_remaining()
+    reserve = conversation.context_tokens - conversation.max_tokens
 
-    conversation.get_response()
-    base = conversation.context_tokens - conversation.max_tokens - 10000
-    assert conversation.context_remaining() == base, (
-        "the anchor is the wire's persisted usage total, not a client-side walk"
+    conversation.add_user_text("q")
+    assert conversation.context_remaining() == reserve - count.prompt_tokens(
+        conversation.wire_request()
     )
+
+    conversation.get_response(tools=[TOOL])
+    sent = count.prompt_tokens(conversation.wire_request([TOOL]))
+    assert sent > count.prompt_tokens(conversation.wire_request()), (
+        "the tool declarations are part of what the next call sends"
+    )
+    assert conversation.context_remaining() == reserve - sent
 
     conversation.add_user_text("three more words")
-    assert conversation.context_remaining() == base - 3, (
-        "text appended since the response is priced by the pinned tokenizer"
-    )
+    assert conversation.context_remaining() == reserve - sent - 3
 
     cost = conversation.image_tokens(str(image))
     conversation.add_user_image(str(image))
-    assert conversation.context_remaining() == base - 3 - cost, (
+    assert conversation.context_remaining() == reserve - sent - 3 - cost, (
         "what a screenshot costs is exactly what adding it takes away"
     )
 
 
-def test_appended_text_is_counted_once_in_the_anchored_refusal(tmp_path):
-    """Text appended after a response is priced exactly once by the anchored
-    delta. The numbers bracket the boundary: counted once, the 10-token task
-    fits exactly under the ceiling a double count would breach, and one word
-    past the true boundary refuses."""
+def test_the_context_left_after_a_round_is_the_next_requests_count(tmp_path):
+    """Asked with the parts a round would append, the context left is the count of the request those parts make — measured with them in place, so the template renders the conversation as it will be sent — and nothing is appended by asking."""
+    from locus.analysis.mlx import count
+    from PIL import Image
+
+    image = tmp_path / "pull.png"
+    Image.new("RGB", (2560, 1323)).save(image)
     conversation = _streaming_conversation(
-        record_dir=tmp_path / "r",
-        card=_tiny_card(180),
-        chunks=[
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }
-                ]
-            },
-            {
-                "usage": {
-                    "prompt_tokens": 90,
-                    "completion_tokens": 10,
-                    "total_tokens": 100,
-                }
-            },
-        ],
+        record_dir=tmp_path / "r", chunks=_reply("two words")
     )
+    reserve = conversation.context_tokens - conversation.max_tokens
     conversation.add_user_text("q")
-    conversation.get_response()
+    conversation.get_response(tools=[TOOL])
+    standing = json.dumps(conversation.contents)
 
-    # anchored 100 + task 10 + max_tokens 64 = 174 <= 180; double-counted the
-    # task it would be 184 > 180 and refuse.
-    conversation.add_user_text("a b c d e f g h i j")
-    conversation.get_response()
+    parts = [("text", "screenshot at 00:01.000:"), ("image", str(image))]
+    room = conversation.context_remaining(parts)
+    assert json.dumps(conversation.contents) == standing, "asking appends nothing"
 
-    # anchor re-set to 100 by that response; 100 + 17 + 64 = 181 > 180.
-    conversation.add_user_text(" ".join(["w"] * 17))
+    conversation.add_user_text(parts[0][1])
+    conversation.add_user_image(parts[1][1])
+    assert room == reserve - count.prompt_tokens(conversation.wire_request([TOOL]))
+    assert room == conversation.context_remaining()
+
+
+def test_the_pre_send_refusal_counts_the_request_as_sent(tmp_path):
+    """The refusal reads the request the call will send, tool declarations included; the numbers bracket the boundary — the request that fits exactly is sent, one word more refuses."""
+    from locus.analysis.mlx import count
+
+    probe = _streaming_conversation(record_dir=tmp_path / "probe", chunks=[])
+    probe.add_user_text("q")
+    exact = count.prompt_tokens(probe.wire_request([TOOL]))
+
+    fits = _streaming_conversation(
+        record_dir=tmp_path / "fits", card=_tiny_card(exact + 64), chunks=_reply("ok")
+    )
+    fits.add_user_text("q")
+    fits.get_response(tools=[TOOL])
+
+    over = _streaming_conversation(
+        record_dir=tmp_path / "over", card=_tiny_card(exact + 64), chunks=_reply("ok")
+    )
+    over.add_user_text("q w")
     with pytest.raises(ValueError, match="refused before send"):
-        conversation.get_response()
+        over.get_response(tools=[TOOL])
 
 
 def _flattened(messages):

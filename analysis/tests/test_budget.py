@@ -1,37 +1,34 @@
 """Analysis pricing.
 
-The tokenizer and preprocessor config are monkeypatched (no network, no HF cache); the projection itself is covered by test_analyze.py. The Qwen screenshot-token closed form is pinned against real processor output: the geometry cases below were computed by the actual pinned image processor on real screenshot dimensions — if the form or constants drift, these fail before a wrong count ships. Pricing runs against an injected CostModel so every economic constant is the test's own; the composition underneath (compose_window, screenshot_moments, the walls) is real.
+The projection itself is covered by test_analyze.py. Pricing runs against an injected CostModel so every economic constant is the test's own; the composition underneath (compose_window, screenshot_moments, the walls) is real. The backends' own cost models run here on the offline count (_analysis_support.install_offline_count): the server's own count they call is proven against the live server in the mlx suites, so what is tested here is what each cost model hands it.
 """
 
 import itertools
 import json as _json
 
 import pytest
-from _analysis_support import install_offline_tokenizer
+from _analysis_support import GEMINI, install_offline_count, offline_image_tokens
 from locus.analysis import budget
-from locus.analysis.budget import CostModel, price_payload, window_payload
+from locus.analysis.budget import CostModel, Count, price_payload, window_payload
+from locus.analysis.select_screenshots import screenshot_moments
 from locus.analysis.window import resolve_window, slice_pieces
 from locus.evidence.db import connect
 from locus.evidence.hydrate import pack_raw
-from locus.evidence.rrweb_constants import EventType
+from locus.evidence.kinds import Kind
+from locus.evidence.rrweb_constants import EventType, IncrementalSource
 
-PROCESSOR_VALIDATED = [
-    ((390, 663), 252),
-    ((501, 959), 480),
-    ((1366, 917), 1247),
-    ((1366, 981), 1333),
-    ((1920, 921), 1740),
-]
+LOCAL_CARD = "qwen3.6-35b-a3b-6bit"
 
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    install_offline_tokenizer(monkeypatch)
+    install_offline_count(monkeypatch)
 
 
 SYSTEM = "system prompt for the pricing tests"
 SITE = "a demo site"
 TASK = "the entire question the caller sends last"
+TOOL = {"name": "a_tool", "description": "four words of declaration"}
 
 
 KIND_TYPES = {
@@ -95,6 +92,30 @@ def _plain_slice(conn, sid, visitor, start, url):
     )
 
 
+def _resize(conn, sid, ts, width, height):
+    raw = {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": ts,
+        "data": {
+            "source": IncrementalSource.ViewportResize,
+            "width": width,
+            "height": height,
+        },
+    }
+    conn.execute(
+        "INSERT INTO events (visitor_id, timestamp, type, raw_json, content_hash, "
+        "slice_id, type_str) VALUES ('v1', ?, ?, ?, ?, ?, ?)",
+        (
+            ts,
+            raw["type"],
+            pack_raw(_json.dumps(raw)),
+            f"resize{sid}_{ts}",
+            sid,
+            Kind.VIEWPORT_RESIZE,
+        ),
+    )
+
+
 @pytest.fixture
 def conn(tmp_path):
     conn = connect(tmp_path / "events.db")
@@ -106,29 +127,43 @@ def conn(tmp_path):
     return conn
 
 
-def _model(count=None, verify=None, screenshot=10):
+def _words(texts):
+    return sum(len(t.split()) for t in texts)
+
+
+def _model(screenshot=10):
+    def one(conn, window, contract, moments, site_contexts):
+        system_prompt, task, _ = contract
+        texts, n_events = window_payload(
+            conn,
+            window,
+            system_prompt=system_prompt,
+            task=task,
+            site_contexts=site_contexts,
+            moments=moments,
+        )
+        n_screenshots = sum(len(timestamps) for timestamps in moments.values())
+        return Count(_words(texts), n_screenshots * screenshot, n_events)
+
     return CostModel(
-        count_text=count or (lambda texts: sum(len(t.split()) for t in texts)),
-        verify_text=verify,
-        screenshot_tokens=lambda c, moments: (
-            sum(len(timestamps) for timestamps in moments.values()) * screenshot
-        ),
+        lambda conn, sets, site_contexts: [
+            one(conn, *measured, site_contexts) for measured in sets
+        ]
     )
 
 
 def _prompts(labels):
-    return SYSTEM, TASK
+    return SYSTEM, TASK, [TOOL]
 
 
 def _cost(conn, model, sids, ws=None, we=None):
-    texts, moments, _ = window_payload(
+    window = resolve_window(conn, sids, ws, we)
+    (counted,) = model.count(
         conn,
-        resolve_window(conn, sids, ws, we),
-        system_prompt=SYSTEM,
-        task=TASK,
-        site_contexts={"site": SITE},
+        [(window, _prompts(window.labels), screenshot_moments(conn, window))],
+        {"site": SITE},
     )
-    return model.count_text(texts) + model.screenshot_tokens(conn, moments)
+    return counted.text_tokens + counted.screenshot_tokens
 
 
 def _price(conn, sids, budget_tokens, model=None, **kwargs):
@@ -145,43 +180,167 @@ def _price(conn, sids, budget_tokens, model=None, **kwargs):
     )
 
 
-@pytest.mark.parametrize("size,expected", PROCESSOR_VALIDATED)
-def test_qwen_image_tokens_matches_processor(size, expected):
-    width, height = size
-    assert budget.qwen_image_tokens(width, height) == expected
-
-
 def test_image_geometry_realizes_the_per_image_token_ceiling():
-    assert budget.image_geometry(390, 663, 600) == (390, 663), (
+    model = "any"
+    assert budget.image_geometry(model, 390, 663, 600) == (390, 663), (
         "a screenshot under the ceiling passes untouched — never upscaled"
     )
-    width, height = budget.image_geometry(1920, 921, 600)
+    width, height = budget.image_geometry(model, 1920, 921, 600)
     assert (width, height) != (1920, 921)
-    assert budget.qwen_image_tokens(width, height) <= 600, (
-        "the ceiling is a hard bound on the sent geometry's price"
+    assert offline_image_tokens(model, width, height) <= 600, (
+        "the ceiling is a hard bound on what the sent image costs"
     )
-    assert budget.qwen_image_tokens(width, height) > 540, (
+    assert offline_image_tokens(model, width, height) > 540, (
         "the resize lands near the ceiling, not far under it"
     )
     assert abs(width / height - 1920 / 921) < 0.05, "aspect preserved"
 
 
-def test_a_ceiling_below_the_model_floor_fails_loud():
+def test_a_ceiling_below_the_smallest_image_fails_loud(monkeypatch):
+    from locus.analysis.mlx import count
+
+    monkeypatch.setattr(count, "image_tokens", lambda model, w, h: 66 + w * h // 1024)
     with pytest.raises(ValueError, match="ceiling"):
-        budget.image_geometry(1920, 921, 10)
+        budget.image_geometry("any", 1920, 921, 10)
 
 
-def test_slice_viewport_reads_meta(conn):
-    assert budget.slice_viewport(conn, 1) == (390, 663)
+def _local(conn, sids, moments, tools=(TOOL,)):
+    window = resolve_window(conn, sids)
+    model, _, _ = budget.cost_model_for(LOCAL_CARD)
+    (counted,) = model.count(
+        conn, [(window, (SYSTEM, TASK, list(tools)), moments)], {"site": SITE}
+    )
+    return counted
 
 
-def test_window_payload_is_the_real_composition(conn):
-    texts, moments, n_events = window_payload(
+def test_a_local_screenshot_is_priced_at_its_moments_viewport_under_the_ceiling(conn):
+    """The replayer sizes its frame at every Meta and ViewportResize it applies, so a visitor who resizes mid-slice changes the size of every screenshot after — and each is then sent shrunk under the card's activity ceiling, so that is the size the server counts."""
+    from locus.analysis.model.cards import max_image_tokens
+
+    _resize(conn, 1, 3_000, 1366, 917)
+    ceiling = max_image_tokens(LOCAL_CARD)["activity_screenshots"]
+    counted = _local(conn, [1], {1: [2_000, 4_500]})
+    assert counted.screenshot_tokens == offline_image_tokens(
+        None, 390, 663
+    ) + offline_image_tokens(None, *budget.image_geometry("any", 1366, 917, ceiling))
+
+
+def test_a_local_price_is_the_request_a_run_sends(conn):
+    """Composed into the real client, the counted request carries what the tally composes — system prompt, window, question — and the tool declarations the run's request carries."""
+    moments = {1: [2_000]}
+    texts, _ = window_payload(
         conn,
         resolve_window(conn, [1]),
         system_prompt=SYSTEM,
         task=TASK,
         site_contexts={"site": SITE},
+        moments=moments,
+    )
+    with_tool = _local(conn, [1], moments)
+    assert with_tool.text_tokens == _words(texts) + len(
+        _json.dumps([{"type": "function", "function": TOOL}]).split()
+    )
+    assert _local(conn, [1], moments, tools=()).text_tokens == _words(texts)
+
+
+def test_a_moment_before_any_viewport_is_unpriceable(conn):
+    with pytest.raises(ValueError, match="no viewport"):
+        _local(conn, [1], {1: [999]})
+
+
+def test_gemini_text_is_counted_by_counttokens_and_screenshots_at_their_tier(
+    conn, monkeypatch
+):
+    from locus.analysis.model import gemini
+    from locus.analysis.model.cards import media_resolution
+
+    monkeypatch.setattr(gemini, "count_text_tokens", lambda model, texts: _words(texts))
+    model, _, _ = budget.cost_model_for(GEMINI)
+    window = resolve_window(conn, [1])
+    moments = screenshot_moments(conn, window)
+    (counted,) = model.count(
+        conn, [(window, (SYSTEM, TASK, [TOOL]), moments)], {"site": SITE}
+    )
+    texts, n_events = window_payload(
+        conn,
+        window,
+        system_prompt=SYSTEM,
+        task=TASK,
+        site_contexts={"site": SITE},
+        moments=moments,
+    )
+    tiers = media_resolution(GEMINI)
+    tier = tiers.get("activity_screenshots", tiers.get("pulled_screenshots"))
+    assert counted == Count(
+        _words(texts),
+        len(moments[1]) * gemini.image_tier_tokens(tier),
+        n_events,
+    )
+
+
+def test_gemini_counts_every_measured_set_at_once(conn, monkeypatch):
+    """The whole window and each slice standalone go to countTokens together, one call per set — so a report costs about one round trip, whatever the sets — and each count lands on its own set."""
+    import threading
+
+    from locus.analysis.model import gemini
+
+    sets = 4
+    together = threading.Barrier(sets, timeout=10)
+
+    def count_text_tokens(model, texts):
+        together.wait()
+        return _words(texts)
+
+    monkeypatch.setattr(gemini, "count_text_tokens", count_text_tokens)
+    model, context, _ = budget.cost_model_for(GEMINI)
+    price = price_payload(
+        conn,
+        resolve_window(conn, [1, 2, 3]),
+        model=GEMINI,
+        prompts=_prompts,
+        site_contexts={"site": SITE},
+        cost_model=model,
+        context_tokens=context,
+        headroom=1.0,
+    )
+    from locus.analysis.model.cards import media_resolution
+
+    tiers = media_resolution(GEMINI)
+    tier = gemini.image_tier_tokens(
+        tiers.get("activity_screenshots", tiers.get("pulled_screenshots"))
+    )
+    expected = _model(screenshot=tier)
+    assert price["turn1"]["total_tokens"] == _cost(conn, expected, [1, 2, 3])
+    for sid, entry in zip([1, 2, 3], price["per_slice"], strict=True):
+        assert entry["standalone_tokens"] == _cost(conn, expected, [sid]), (
+            "each slice's count is its own"
+        )
+
+
+def test_gemini_counts_fail_loud_when_any_call_fails(monkeypatch):
+    from locus.analysis.model import gemini
+
+    def count_text_tokens(model, texts):
+        if texts == ["b"]:
+            raise RuntimeError("quota")
+        return len(texts)
+
+    monkeypatch.setattr(gemini, "count_text_tokens", count_text_tokens)
+    assert gemini.count_texts("m", [["a"], ["c", "d"]]) == [1, 2]
+    with pytest.raises(RuntimeError, match="quota"):
+        gemini.count_texts("m", [["a"], ["b"]])
+
+
+def test_window_payload_is_the_real_composition(conn):
+    window = resolve_window(conn, [1])
+    moments = screenshot_moments(conn, window)
+    texts, n_events = window_payload(
+        conn,
+        window,
+        system_prompt=SYSTEM,
+        task=TASK,
+        site_contexts={"site": SITE},
+        moments=moments,
     )
     joined = "\n".join(texts)
     assert SYSTEM in joined and SITE in joined
@@ -205,7 +364,7 @@ def test_price_totals_are_the_turn_one_payload(conn):
         "the fit is judged on what is sent, never on a turn that has not happened"
     )
     assert turn1["context_pct"] == round(cost / 10_000 * 100, 1)
-    assert turn1["fits"] is True and turn1["verified"] is False
+    assert turn1["fits"] is True
     assert "per_slice" not in price, "one slice has nothing to whittle"
     assert "pieces" not in price, "a fitting payload offers no pieces"
 
@@ -229,7 +388,7 @@ def test_each_measured_set_is_priced_as_its_own_window(conn):
 
     def prompts(labels):
         seen.append(tuple(labels))
-        return SYSTEM, TASK
+        return SYSTEM, TASK, [TOOL]
 
     price_payload(
         conn,
@@ -244,21 +403,6 @@ def test_each_measured_set_is_priced_as_its_own_window(conn):
     assert ("S1", "S2") in seen, "the whole payload is a two-slice window"
     assert seen.count(("S1",)) == 2, (
         "each standalone slice is its own single-slice window"
-    )
-
-
-def test_price_verifies_with_the_exact_instrument(conn):
-    inflate = 50
-    model = _model(verify=lambda texts: sum(len(t.split()) for t in texts) + inflate)
-    proposed = _cost(conn, model, [1])
-    price = _price(conn, [1], proposed + 10, model)
-    assert price["turn1"]["verified"] is True
-    assert price["turn1"]["text_tokens"] > 0
-    assert price["turn1"]["total_tokens"] == proposed + inflate, (
-        "the exact instrument's count is the one the fit is judged on"
-    )
-    assert price["turn1"]["fits"] is False, (
-        "propose fit, verify overflowed — the verified number decides"
     )
 
 
@@ -416,110 +560,27 @@ def test_disjoint_cross_visitor_slices_price_as_one_analysis(conn):
     )
 
 
-def test_tokenizer_repo_resolves_from_the_declared_local_cards(tmp_path, monkeypatch):
-    """No card key is hardcoded: the instrument is whichever local card the deployment declares (they share it byte-identically), and a deployment declaring none has no local instrument to name — loud, with the countTokens alternative stated."""
-    from _analysis_support import card_roster
+def test_a_gemini_count_rides_out_transient_pushback(monkeypatch):
+    """Each countTokens call carries the API's retry policy, the one a conversation's calls carry, so one 429 or 5xx is waited out rather than failing the report."""
+    from types import SimpleNamespace
 
-    card_roster(
-        monkeypatch,
-        tmp_path,
-        {
-            "some-renamed-card": (
-                'conversation = "openai-compatible"\n'
-                'model = "someone/renamed-qwen"\n'
-                'base_url = "http://127.0.0.1:9/v1"\n'
-                'family = "qwen3"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
-                "thinking_budget = 1\n"
-                "max_tokens = 1\n"
-                "context_tokens = 1000\n"
-                "headroom = 0.8\n"
-                "[sampling]\n"
-                "temperature = 1.0\n"
-            )
-        },
-    )
-    assert budget.tokenizer_repo() == "someone/renamed-qwen"
-
-    card_roster(
-        monkeypatch,
-        tmp_path / "gemini_only",
-        {"gemini-x": "context_tokens = 1000\nheadroom = 0.5\nmax_output_tokens = 64\n"},
-    )
-    with pytest.raises(ValueError, match="openai-compatible"):
-        budget.tokenizer_repo()
-
-
-def test_gemini_pricing_without_local_cards_counts_with_counttokens(
-    tmp_path, monkeypatch
-):
-    """A pure-Gemini deployment prices without any pinned tokenizer: the free countTokens API is the one text instrument, so propose is already exact and there is nothing to verify."""
-    from _analysis_support import card_roster
-    from locus.analysis.budget import cost_model_for
     from locus.analysis.model import gemini
 
-    card_roster(
-        monkeypatch,
-        tmp_path,
-        {
-            "gemini-x": 'conversation = "gemini"\nthinking_levels = ["low"]\ncontext_tokens = 1000\nheadroom = 0.5\nmax_output_tokens = 64\n'
-        },
-    )
-    monkeypatch.setattr(
-        gemini,
-        "count_text_tokens",
-        lambda model, texts: sum(len(t.split()) for t in texts),
-    )
+    seen = {}
 
-    model, context, room = cost_model_for("gemini-x")
-    assert context == 1000 and room == 0.5
-    assert model.verify_text is None, "propose is already the exact instrument"
-    assert model.count_text(["two words", "and three more"]) == 5
-
-
-def test_every_local_card_shares_the_pinned_tokenizer():
-    """The local count is claimed exact — it is the wire's own arithmetic, with no
-    backend instrument behind it to verify against. That holds only while every local
-    card tokenizes and preprocesses identically to the pinned repo. A card whose model
-    breaks that identity must fail here, not silently mis-price every window it serves."""
-    import hashlib
-
-    from huggingface_hub import hf_hub_download
-    from locus.analysis.model.cards import OPENAI_COMPATIBLE, load_card, models_speaking
-
-    def digest(repo, name):
-        with open(hf_hub_download(repo, name), "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
-
-    pinned = {
-        name: digest(budget.tokenizer_repo(), name)
-        for name in (budget.TOKENIZER_FILE, budget.PREPROCESSOR_FILE)
-    }
-
-    local = models_speaking(OPENAI_COMPATIBLE)
-    assert local, "the card roster declares no openai-compatible model"
-    for model in local:
-        repo = load_card(model)["model"]
-        for name, expected in pinned.items():
-            assert digest(repo, name) == expected, (
-                f"{model} ({repo}) does not share the pinned {name} — the local token count is not exact for it"
+    def client(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            models=SimpleNamespace(
+                count_tokens=lambda model, contents: SimpleNamespace(total_tokens=7)
             )
+        )
 
-    # The suite's offline stub carries a hand copy of the pinned preprocessor's fields, and
-    # every screenshot-token pin in this file validates against that copy — so the copy itself is
-    # pinned to the real file here, where the repo is already in hand.
-    from _analysis_support import PREPROCESSOR_CONFIG
-
-    with open(hf_hub_download(budget.tokenizer_repo(), budget.PREPROCESSOR_FILE)) as f:
-        real = _json.load(f)
-    assert PREPROCESSOR_CONFIG == {
-        "patch_size": real["patch_size"],
-        "merge_size": real["merge_size"],
-        "size": {
-            "shortest_edge": real["size"]["shortest_edge"],
-            "longest_edge": real["size"]["longest_edge"],
-        },
-    }, (
-        "the offline preprocessor stub drifted from the pinned repo's real config — the "
-        "screenshot-token tests are validating arithmetic the backend does not run"
+    monkeypatch.setattr(gemini, "_client", client)
+    assert gemini.count_text_tokens("m", ["a b"]) == 7
+    retry = seen["http_options"].retry_options
+    assert (retry.initial_delay, retry.jitter, retry.attempts) == (
+        gemini.RETRY["initial_delay"],
+        gemini.RETRY["jitter"],
+        gemini.RETRY["attempts"],
     )

@@ -7,12 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "locus-evidence",
     "google-genai>=2.8.0",
-    "huggingface-hub>=0.36.0",
     "openai>=2.41.0",
     "pillow>=12.2.0",
     "playwright>=1.60.0",
     "pydantic>=2.13.4",
-    "tokenizers>=0.22.0",
 ]
 
 # The bundled local server's runtime, Apple-silicon only. Without the extra the paid path still
@@ -33,6 +31,8 @@ mlx = [
     # HEIC/HEIF decode for the images the server is handed (PIL alone cannot open them);
     # registered process-wide at boot in serve.py.
     "pillow-heif; sys_platform == 'darwin'",
+    # The count (mlx/count.py) reads a model's processor files from the Hugging Face cache.
+    "huggingface-hub>=0.36.0; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

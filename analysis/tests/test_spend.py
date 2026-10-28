@@ -713,16 +713,12 @@ def test_drift_is_said_once_per_process_at_the_paid_call(
 
 
 def test_price_report_carries_dollars_for_a_priced_model(distilled_db, spend_isolation):
-    from locus.analysis.budget import CostModel, price_payload
+    from locus.analysis.budget import CostModel, Count, price_payload
 
     conn = connect(distilled_db)
-    cost_model = CostModel(
-        count_text=lambda texts: 100,
-        verify_text=None,
-        screenshot_tokens=lambda conn, moments: 10,
-    )
+    cost_model = CostModel(lambda conn, sets, _: [Count(100, 10, 1) for _ in sets])
     common = {
-        "prompts": lambda labels: ("s", "t"),
+        "prompts": lambda labels: ("s", "t", []),
         "site_contexts": {"site": "w"},
         "cost_model": cost_model,
         "context_tokens": 1_000_000,

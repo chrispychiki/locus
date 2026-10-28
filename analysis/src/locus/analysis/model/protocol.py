@@ -17,6 +17,7 @@ import json
 import os
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -346,14 +347,15 @@ class Conversation(ABC):
         """What this image costs on this backend's wire as a pull — the only kind appended after turn 1, which is the only time anything asks."""
 
     @abstractmethod
-    def context_remaining(self) -> int:
-        """Tokens the model's context still holds beyond what this conversation
-        already carries and what its generation will claim. Anchored on the
-        wire's own count — the last response's persisted usage total — plus the
-        priced delta of parts appended since it (_wire_anchored_used), so it is
-        measurable only once a response exists; turn-1 fit is the composition
-        plane's question (budget.price_payload), asked before anything is
-        sent."""
+    def context_remaining(self, appending: Sequence[tuple] = ()) -> int:
+        """Tokens the model's context would still hold beyond this conversation
+        and what its next generation will claim, were `appending` added to it —
+        parts in the record's own shape, in order: ("text", text), ("image",
+        path) for a pull, ("tool", call_id, content). Nothing is appended. By
+        this backend's own wire arithmetic: a backend that cannot run its wire's
+        count here anchors on the last response's usage total
+        (_wire_anchored_used). Turn-1 fit is the composition plane's question
+        (budget.price_payload), asked before anything is sent."""
 
     def _billing(self) -> dict | None:
         """{"model", "prices"} when this conversation's generation calls bill — the card's name and its declared per-token prices — or None when they are free, which is what every free path inherits. The card decides: a pricing block has its calls governed at those rates, and non-None here engages the spend layer in the template method, so a billed conversation is inside the operator's walls and on the ledger by construction (spend.py owns both)."""
@@ -374,15 +376,15 @@ class Conversation(ABC):
 
     def _delta_text_tokens(self, texts: list[str]) -> int:
         """What the given text parts cost on this backend's wire — the pricing
-        half of _wire_anchored_used, implemented by the model-bound backends."""
+        half of _wire_anchored_used, implemented by each backend that anchors."""
         raise NotImplementedError
 
-    def _wire_anchored_used(self) -> int:
+    def _wire_anchored_used(self, appending: Sequence[tuple] = ()) -> int:
         """The conversation's size by the wire's own record: the last response's
         usage total — already persisted to its meta.json — plus the priced delta
-        of parts appended since it (tool-result text, served screenshots). Refuses
-        before any response exists, because there is no wire count to anchor
-        on."""
+        of parts appended since it and of `appending` (tool-result text, served
+        screenshots). Refuses before any response exists, because there is no
+        wire count to anchor on."""
         if self._last_usage_total is None:
             raise RuntimeError(
                 "no response has been received, so there is no wire usage to "
@@ -390,7 +392,7 @@ class Conversation(ABC):
                 "send (budget.price_payload), never asked of the conversation"
             )
         texts, images = [], []
-        for entry in self._record[self._record_at_response :]:
+        for entry in [*self._record[self._record_at_response :], *appending]:
             if entry[0] == "text":
                 texts.append(entry[1])
             elif entry[0] == "tool":

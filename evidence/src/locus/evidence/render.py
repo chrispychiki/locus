@@ -18,7 +18,7 @@ from typing import Self
 
 from .assets import rrweb_constants_js, vendored
 from .rrweb_constants import EventType, IncrementalSource, MouseInteractions
-from .slices import covering_pair, discard_reason, slice_events
+from .slices import covering_pair, discard_reason, slice_events, viewport_at
 
 READINESS_BUDGET_MS = 10_000
 # A follow-on request — a stylesheet's font, an image a script inserts — is issued within a
@@ -382,7 +382,11 @@ class RenderSession:
         page.evaluate(BUILD_JS)
         page.evaluate(WAIT_READY_JS, READINESS_BUDGET_MS)
         page.evaluate(PAUSE_AT_JS, ts)
-        dims = page.evaluate(
+        # The screenshot is the slice's viewport at the moment (slices.viewport_at), the size
+        # pricing counted it at; the replayer's frame must agree, or the price and the screenshot disagree.
+        width, height = viewport_at(sl.events, ts)
+        viewport = {"width": width, "height": height}
+        frame = page.evaluate(
             """() => {
                 const iframeEl = document.querySelector('#replayer iframe');
                 if (!iframeEl) return null;
@@ -391,9 +395,16 @@ class RenderSession:
                 return width && height ? {width, height} : null;
             }"""
         )
-        if dims and dims != self._viewport:
-            page.set_viewport_size(dims)
-            self._viewport = dims
+        if frame and frame != viewport:
+            raise RuntimeError(
+                f"{label} at {ts}: the replayer sized its frame "
+                f"{frame['width']}x{frame['height']}, but the slice's viewport there "
+                f"is {width}x{height} (slices.viewport_at) — the screenshot would not "
+                f"be the size it was priced at"
+            )
+        if viewport != self._viewport:
+            page.set_viewport_size(viewport)
+            self._viewport = viewport
         page.evaluate(
             """(pressed) => {
                 const cursor = document.querySelector('.replayer-mouse');

@@ -11,7 +11,7 @@ from _support import (
     slice_bounds,
 )
 from locus.analysis import engine
-from locus.analysis.budget import CostModel
+from locus.analysis.budget import CostModel, Count, window_payload
 from locus.analysis.model.protocol import Response, ToolCall
 from locus.analysis.prompts import (
     EMPTY_ANSWER_REPAIR,
@@ -52,10 +52,26 @@ def _homed(conv, kwargs):
 
 
 def _word_cost_model():
+    def one(conn, window, contract, moments, site_contexts):
+        system_prompt, task, _ = contract
+        texts, n_events = window_payload(
+            conn,
+            window,
+            system_prompt=system_prompt,
+            task=task,
+            site_contexts=site_contexts,
+            moments=moments,
+        )
+        return Count(
+            sum(len(t.split()) for t in texts),
+            sum(len(v) for v in moments.values()),
+            n_events,
+        )
+
     return CostModel(
-        count_text=lambda texts: sum(len(t.split()) for t in texts),
-        verify_text=None,
-        screenshot_tokens=lambda c, moments: sum(len(v) for v in moments.values()),
+        lambda conn, sets, site_contexts: [
+            one(conn, *measured, site_contexts) for measured in sets
+        ]
     )
 
 

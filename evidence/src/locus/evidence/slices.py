@@ -28,7 +28,8 @@ import subprocess
 from .assets import script
 from .db import CANONICAL_ORDER, SLICE_FACTS
 from .hydrate import raw_event
-from .rrweb_constants import EventType
+from .kinds import Kind
+from .rrweb_constants import EventType, IncrementalSource
 
 ORPHAN_REASON = "no covering FullSnapshot after Meta"
 NO_SNAPSHOT_REASON = "no snapshot: the slice's chunks carry no Meta"
@@ -113,6 +114,43 @@ def discard_reason(events: list[dict]) -> str | None:
     if (snapshot.get("data") or {}).get("node", {}).get("id") is None:
         return DAMAGED_SNAPSHOT_REASON
     return None
+
+
+def viewport_at(events: list[dict], ts: int) -> tuple[int, int]:
+    """The viewport a slice shows at `ts` — what its replay is sized to there, and so the size of a screenshot taken there: the last Meta or ViewportResize stamped at or before it, read from the slice's raw events in canonical order (any subset holding those two kinds will do). The replayer resizes its frame at each of them as it applies them. A resize reported at zero width or height leaves the frame showing nothing, so the size it last showed stands."""
+    viewport = None
+    for event in events:
+        if event["timestamp"] > ts:
+            break
+        data = event.get("data") or {}
+        if (
+            (
+                event["type"] == EventType.Meta
+                or (
+                    event["type"] == EventType.IncrementalSnapshot
+                    and data.get("source") == IncrementalSource.ViewportResize
+                )
+            )
+            and data.get("width")
+            and data.get("height")
+        ):
+            viewport = (data["width"], data["height"])
+    if viewport is None:
+        raise ValueError(
+            f"no viewport stated at or before {ts} (no Meta or ViewportResize with "
+            f"a width and height) — a moment ahead of the slice's first Meta "
+            f"has no page to show"
+        )
+    return viewport
+
+
+def viewport_events(conn: sqlite3.Connection, slice_id: int) -> list[dict]:
+    """A slice's Meta and ViewportResize events, raw, in canonical order — the part of the slice viewport_at reads, without the rest of its payloads."""
+    rows = conn.execute(
+        f"SELECT raw_json FROM events WHERE slice_id = ? AND type_str IN (?, ?) {CANONICAL_ORDER}",
+        (slice_id, Kind.META, Kind.VIEWPORT_RESIZE),
+    ).fetchall()
+    return [raw_event(row["raw_json"]) for row in rows]
 
 
 def slice_events(conn: sqlite3.Connection, slice_id: int) -> list[dict]:

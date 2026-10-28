@@ -1,11 +1,10 @@
-"""Analysis-side test scaffolding: the deployment's Gemini id, hand-built claims and verdicts, a scripted Conversation, and the offline tokenizer.
+"""Analysis-side test scaffolding: the deployment's Gemini id, hand-built claims and verdicts, a scripted Conversation, and the offline count.
 The event builders, db builders, and the fixtures both suites share live in evidence/tests/_support.py, which conftest.py puts on the import path."""
 
 from pathlib import Path
 
 import pytest
 import tomllib
-from locus.analysis import budget
 from locus.analysis.ground.claims import Claim, ClaimType, TimestampComponents
 from locus.analysis.model.cards import GEMINI as GEMINI_CLIENT
 from locus.analysis.model.cards import models_speaking
@@ -88,28 +87,36 @@ class Verdicts:
         self.evaluations = evaluations
 
 
-PREPROCESSOR_CONFIG = {
-    "patch_size": 16,
-    "merge_size": 2,
-    "size": {"shortest_edge": 65536, "longest_edge": 16777216},
-}
+def offline_image_tokens(model, width, height):
+    """The offline count's price of one image: a token per started 32x32 block of pixels."""
+    return -(-width // 32) * -(-height // 32)
 
 
-def install_offline_tokenizer(monkeypatch):
-    """Price windows without the network or an HF cache. The real pinned tokenizer is what
-    ships; here text is one token per word, so a suite's expected counts are its own arithmetic.
-    The preprocessor config is the real one — the screenshot-token closed form is pinned against it."""
+def install_offline_count(monkeypatch):
+    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in the mlx suites; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at — so a suite's expected counts are its own arithmetic."""
+    import json
 
-    class Encoding:
-        def __init__(self, n):
-            self.ids = list(range(n))
+    from locus.analysis.mlx import count
+    from PIL import Image
 
-    class Tokenizer:
-        def encode(self, text):
-            return Encoding(len(text.split()))
+    def prompt_tokens(request):
+        tools = request.get("tools")
+        words, sizes = len(json.dumps(tools).split()) if tools else 0, []
+        for message in request["messages"]:
+            content = message.get("content") or ""
+            if isinstance(content, str):
+                words += len(content.split())
+                continue
+            for part in content:
+                if part["type"] == "text":
+                    words += len(part["text"].split())
+                else:
+                    with Image.open(part["image_url"]["url"]) as image:
+                        sizes.append(image.size)
+        return words + sum(offline_image_tokens(None, *size) for size in sizes)
 
-    monkeypatch.setattr(budget, "_tokenizer", Tokenizer())
-    monkeypatch.setattr(budget, "_preprocessor_config", PREPROCESSOR_CONFIG)
+    monkeypatch.setattr(count, "prompt_tokens", prompt_tokens)
+    monkeypatch.setattr(count, "image_tokens", offline_image_tokens)
 
 
 class ScriptedConversation(Conversation):
@@ -147,8 +154,9 @@ class ScriptedConversation(Conversation):
     def image_tokens(self, image_path):
         return 1
 
-    def context_remaining(self):
-        return self.room - len(self.images)
+    def context_remaining(self, appending=()):
+        pending = sum(1 for part in appending if part[0] == "image")
+        return self.room - len(self.images) - pending
 
     def _add_tool_result(self, call_id, content):
         self.parts.append(("tool", call_id, content))

@@ -6,7 +6,7 @@ Client and server share a filesystem: images travel as plain absolute paths and 
 - the conversation only ever grows: every part is appended ahead of the call that sends it and stays, so each request's token sequence extends the last one's rather than rewriting its middle — the shape any server-side prefix cache reuses on, where one is enabled (analysis/README.md § Throughput, caching, concurrency);
 - thinking arrives as `reasoning` on the message (`reasoning_content` is read first for compatibility); assistant replay turns carry both keys, and the server hands `reasoning_content` to the chat template, which renders it by the model family's own convention (Qwen renders it only for an assistant turn that comes after the conversation's last user turn, so a reply the conversation has since asked something about replays as its answer alone);
 - the default timeout is None — infinite — because local generation can outrun any fixed budget;
-- every request is priced before send and refused loud when the count plus max_tokens exceeds the card's context_tokens — before paying tokenization and upload for a doomed request. The turn-1 count walks the composed parts with the composition plane's own instruments (budget.py: the pinned tokenizer for text, the smart_resize closed form over real image dimensions — exact there, because everything on turn 1 is client-authored text and images); every later count, the refusal's and context_remaining's alike, anchors on the last response's usage total — the wire's own record — plus the priced delta of parts appended since it. The server enforces the same bound when MAX_KV_SIZE is set (its count includes expanded vision tokens); the client refusal is the cheap, informative half. The client arithmetic is one model family's wire behavior — the card declares its membership (`family`, validated in cards.py), so a model outside the family is refused at card load rather than silently priced and resized with math that is not its own;
+- every request is counted before send and refused loud when the count plus max_tokens exceeds the card's context_tokens. The count is the server's own, run here by the server's own code over the request as it will be sent (mlx/count.py), so the refusal, context_remaining and pricing (budget.py) all read the number the server will report. The server enforces the same bound when MAX_KV_SIZE is set; the client refusal is the informative half, made before a doomed request waits on admission;
 - every request sends `context_management: []`. Upstream's chat handler otherwise compacts the conversation: it clamps max_tokens to the context left and, past the limit, replaces the conversation's head with a model-written summary. With it, the conversation is served exactly as composed, and a request over the limit meets the server's own refusal;
 - images are carried under the card's per-image token ceilings (`max_image_tokens`, one per kind of screenshot — the pushed activity set and the served pulls), realized by _within_ceiling;
 - every request streams (`stream_options.include_usage`) and is reassembled here into the same persisted record a non-streamed call would leave: content and reasoning deltas concatenated, tool-call deltas merged by index, usage from the terminal usage chunk. Streaming is what makes a long generation legible while it runs — the deltas are the run's progress, and the server serves one request at a time from admission to the end of its response;
@@ -75,6 +75,7 @@ class OpenAICompatConversation(Conversation):
         self.dry_run = dry_run
         self.contents: list[dict] = []
         self._tmpdir: str | None = None
+        self._last_shape: tuple = (None, None)
 
     def _user_parts(self) -> list[dict]:
         if self.contents and self.contents[-1]["role"] == "user":
@@ -116,7 +117,7 @@ class OpenAICompatConversation(Conversation):
         from ..budget import image_geometry
 
         with Image.open(path) as img:
-            geometry = image_geometry(*img.size, ceiling)
+            geometry = image_geometry(self.model, *img.size, ceiling)
             if geometry == img.size:
                 return str(path.resolve())
             shrunk = img.resize(geometry, Image.LANCZOS)
@@ -128,19 +129,38 @@ class OpenAICompatConversation(Conversation):
             return str(out)
 
     def image_tokens(self, image_path: str) -> int:
-        """What a pull costs: the geometry the pulled_screenshots ceiling sends it at. The pushed set is never priced here — it is priced as a window before turn 1 (budget.price_payload), at the activity ceiling."""
+        """What a pull costs: the server's own count of the image at the geometry the pulled_screenshots ceiling sends it at. The pushed set is never priced here — it is priced as a window before turn 1 (budget.price_payload), at the activity ceiling."""
         from PIL import Image
 
-        from ..budget import image_geometry, qwen_image_tokens
+        from ..budget import image_geometry
+        from ..mlx.count import image_tokens
 
         with Image.open(image_path) as image:
-            return qwen_image_tokens(
-                *image_geometry(*image.size, self._ceiling(pushed=False))
+            return image_tokens(
+                self.model,
+                *image_geometry(self.model, *image.size, self._ceiling(pushed=False)),
             )
 
-    def context_remaining(self) -> int:
-        """What the model's context still holds for this conversation to grow into: context_tokens minus max_tokens (generation shares the context here, so the next call's ceiling stays reserved) minus the wire-anchored size — the last response's usage total, whose completion half counts thinking the template never replays, so the anchor errs conservative — plus the priced delta of parts appended since it (tool-result text through the pinned tokenizer, images at the geometry the card sends)."""
-        return self.context_tokens - self.max_tokens - self._wire_anchored_used()
+    def context_remaining(self, appending=()) -> int:
+        """What the model's context would still hold for this conversation to grow into, were `appending` added: context_tokens minus max_tokens (generation shares the context here, so the next call's ceiling stays reserved) minus the next request — the conversation with those parts, sent the way its last call was sent — counted by the server's own code (mlx/count.py). The parts are appended as add_* appends them, so the template renders them in place (a reply's thinking, for one, is dropped once a user turn follows it), then taken back off."""
+        if not appending:
+            return self.context_tokens - self.max_tokens - self._prompt_tokens()
+        import copy
+
+        standing = copy.deepcopy(self.contents)
+        try:
+            for part in appending:
+                if part[0] == "text":
+                    self._add_user_text(part[1])
+                elif part[0] == "image":
+                    self._add_user_image(part[1], pushed=False)
+                elif part[0] == "tool":
+                    self._add_tool_result(part[1], part[2])
+                else:
+                    raise ValueError(f"unknown part kind {part[0]!r}")
+            return self.context_tokens - self.max_tokens - self._prompt_tokens()
+        finally:
+            self.contents = standing
 
     def _billing(self) -> dict | None:
         """The card decides: the shipped local cards declare no pricing block, so their calls are free and the spend layer never engages; a card that does declare one has every call governed at its rates — which is also how the spend machinery is proven live for zero dollars, on a priced copy of a local card against the real server."""
@@ -156,14 +176,6 @@ class OpenAICompatConversation(Conversation):
             "output_tokens": usage_metadata.get("completion_tokens") or 0,
             "thoughts_tokens": 0,
         }
-
-    def _usage_total(self, usage_metadata: dict) -> int | None:
-        return usage_metadata.get("total_tokens")
-
-    def _delta_text_tokens(self, texts: list[str]) -> int:
-        from ..budget import count_text_tokens
-
-        return sum(count_text_tokens(text) for text in texts)
 
     def _add_tool_result(self, call_id: str, content: str) -> None:
         self.contents.append(
@@ -195,29 +207,32 @@ class OpenAICompatConversation(Conversation):
                 params["extra_body"][key] = value
         return params
 
+    def wire_request(
+        self, tools: list | None = None, response_schema: Any = None
+    ) -> dict:
+        """The chat-completions request this conversation sends as it stands — the one body the wire, the pre-send count and pricing all read."""
+        params = self._request_params()
+        if tools:
+            params["tools"] = [{"type": "function", "function": t} for t in tools]
+        if response_schema is not None:
+            params["response_format"] = _json_schema_format(response_schema)
+        return params
+
+    def sent_images(self) -> list[str]:
+        """The file each image part sends, in order — the shrunk copy where the ceiling made one."""
+        return [
+            part["image_url"]["url"]
+            for message in self.contents
+            if isinstance(message["content"], list)
+            for part in message["content"]
+            if part["type"] == "image_url"
+        ]
+
     def _prompt_tokens(self) -> int:
-        """What the conversation as it stands costs on the wire. After a response exists the count anchors on the wire's own record (_wire_anchored_used); before one — turn 1, where every part is client-authored text and images — the composed parts are walked with the composition plane's instruments (the pinned tokenizer, the smart_resize closed form)."""
-        from PIL import Image
+        """The conversation's prompt as the server counts it, by the server's own code (mlx/count.py), sent the way its last call was sent."""
+        from ..mlx.count import prompt_tokens
 
-        from ..budget import count_text_tokens, qwen_image_tokens
-
-        if self._last_usage_total is not None:
-            return self._wire_anchored_used()
-
-        text = count_text_tokens(self.system_prompt or "")
-        images = 0
-        for message in self.contents:
-            content = message["content"]
-            if isinstance(content, str):
-                text += count_text_tokens(content)
-                continue
-            for part in content:
-                if part["type"] == "text":
-                    text += count_text_tokens(part["text"])
-                else:
-                    with Image.open(part["image_url"]["url"]) as image:
-                        images += qwen_image_tokens(*image.size)
-        return text + images
+        return prompt_tokens(self.wire_request(*self._last_shape))
 
     def _refuse_oversized(self) -> None:
         prompt = self._prompt_tokens()
@@ -239,13 +254,9 @@ class OpenAICompatConversation(Conversation):
 
         if not self.contents:
             raise ValueError("conversation has no user content")
+        self._last_shape = (tools, response_schema)
         self._refuse_oversized()
-
-        params = self._request_params()
-        if tools:
-            params["tools"] = [{"type": "function", "function": t} for t in tools]
-        if response_schema is not None:
-            params["response_format"] = _json_schema_format(response_schema)
+        params = self.wire_request(tools, response_schema)
 
         if self.dry_run:
             raise DryRun(

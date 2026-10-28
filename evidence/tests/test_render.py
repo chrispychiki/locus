@@ -599,6 +599,67 @@ def test_a_capture_shows_the_moment_not_the_captures_before_it(tmp_path):
     assert seen == [["scrolled", 700], ["early", 0]]
 
 
+def _resizing_slice(tmp_path):
+    conn = connect(tmp_path / "events.db")
+    body = {
+        "type": NodeType.Element,
+        "tagName": "div",
+        "id": 4,
+        "attributes": {},
+        "childNodes": [{"type": NodeType.Text, "id": 5, "textContent": "hello"}],
+    }
+    _synthetic(
+        conn,
+        [
+            _meta(1000),
+            _page_snapshot(1001, [body]),
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 2000,
+                "data": {
+                    "source": IncrementalSource.ViewportResize,
+                    "width": 390,
+                    "height": 663,
+                },
+            },
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 3000,
+                "data": {"source": IncrementalSource.Scroll, "id": 1, "x": 0, "y": 0},
+            },
+        ],
+    )
+    materialize_slices(conn, "v1")
+    return conn, conn.execute("SELECT id FROM slices").fetchone()["id"]
+
+
+def test_a_screenshot_is_the_size_of_its_moments_viewport(tmp_path):
+    """A visitor who resizes mid-slice resizes every screenshot after — the size pricing counts each one at (slices.viewport_at) — in whatever order the moments are captured."""
+    from PIL import Image
+
+    conn, slice_id = _resizing_slice(tmp_path)
+    sizes = []
+    with RenderSession(conn, {"S1": slice_id}, tmp_path / "screenshots") as session:
+        for ts in (2500, 1500, 2000):
+            with Image.open(session.capture("S1", ts).path) as png:
+                sizes.append(png.size)
+    assert sizes == [(390, 663), (1280, 800), (390, 663)]
+
+
+def test_a_frame_that_disagrees_with_the_moments_viewport_is_refused(
+    tmp_path, monkeypatch
+):
+    from locus.evidence import render
+
+    conn, slice_id = _resizing_slice(tmp_path)
+    monkeypatch.setattr(render, "viewport_at", lambda events, ts: (1000, 700))
+    with (
+        RenderSession(conn, {"S1": slice_id}, tmp_path / "screenshots") as session,
+        pytest.raises(RuntimeError, match="sized its frame 390x663"),
+    ):
+        session.capture("S1", 2500)
+
+
 def test_a_capture_lays_out_complete_before_its_scrolls_apply(
     tmp_path,
 ):

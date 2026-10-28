@@ -21,6 +21,8 @@ from locus.evidence.slices import (
     ORPHAN_REASON,
     materialize_slices,
     rescue_orphan_slices,
+    viewport_at,
+    viewport_events,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "demo_recording.json"
@@ -268,6 +270,57 @@ def test_a_zero_dimension_viewport_is_discarded_as_a_page_no_human_saw(tmp_path)
     assert summary == {"replayable": 0, "discarded": 1}
     row = conn.execute("SELECT * FROM slices").fetchone()
     assert row["reason"] == "zero-dimension viewport in Meta (0x0)"
+
+
+def _viewport_resize(ts, width, height):
+    return {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": ts,
+        "data": {
+            "source": IncrementalSource.ViewportResize,
+            "width": width,
+            "height": height,
+        },
+    }
+
+
+def test_the_viewport_at_a_moment_is_the_last_one_stated_at_or_before_it(tmp_path):
+    """The replayer sizes its frame at every Meta and ViewportResize it applies, so a visitor who resizes mid-slice changes the size of everything shown after; a resize reported at zero width or height leaves the frame showing nothing, so the size last shown stands."""
+    from locus.evidence.derive import run_distill
+
+    db = tmp_path / "events.db"
+    conn = connect(db)
+    hydrate(
+        conn,
+        "v1",
+        stamped(
+            [
+                meta(1000),
+                full_snapshot(1001),
+                click(2000, 3),
+                _viewport_resize(3000, 390, 663),
+                _viewport_resize(4000, 0, 663),
+                click(5000, 3),
+            ]
+        ),
+    )
+    materialize_slices(conn, "v1")
+    conn.close()
+    run_distill(str(db))
+    conn = connect(db)
+    (slice_id,) = [row["id"] for row in conn.execute("SELECT id FROM slices")]
+
+    events = viewport_events(conn, slice_id)
+    assert [event["timestamp"] for event in events] == [1000, 3000, 4000], (
+        "only the events that state a viewport"
+    )
+    assert viewport_at(events, 2999) == (1280, 800)
+    assert viewport_at(events, 3000) == (390, 663), "a resize at the moment applies"
+    assert viewport_at(events, 5000) == (390, 663), (
+        "a zero-size resize shows nothing new"
+    )
+    with pytest.raises(ValueError, match="no viewport"):
+        viewport_at(events, 999)
 
 
 def test_chained_orphans_rescue_in_sequence_gated_on_the_prior_rescues_state(tmp_path):

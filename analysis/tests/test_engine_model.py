@@ -11,6 +11,7 @@ paths); the identical wiring runs on Gemini but spends money, so the free local 
 is the one in the suite. Server down → the test skips with the boot command.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -32,13 +33,26 @@ def test_engine_against_local_model(distilled_db, tmp_path):
 
     from locus.analysis.window import resolve_window
 
+    window = resolve_window(conn, [slice_id])
+    price = engine.price_analysis(
+        conn,
+        window,
+        question=QUESTION,
+        model=MLX_MODEL,
+        site_contexts={"site": CONTEXT},
+    )
     manifest = engine.run_analysis(
         conn,
-        resolve_window(conn, [slice_id]),
+        window,
         question=QUESTION,
         model=MLX_MODEL,
         site_contexts={"site": CONTEXT},
         out_dir=engine.home_analysis(out),
+    )
+
+    first_call = json.loads((out / "1_answer_meta.json").read_text())
+    assert price["turn1"]["total_tokens"] == first_call["usage"]["prompt_tokens"], (
+        "the price is the server's own count of the request the run opens with"
     )
 
     assert manifest["n_activity_screenshots"] >= 1, (

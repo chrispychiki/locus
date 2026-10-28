@@ -42,15 +42,44 @@ MODELS_TOML = Path(__file__).parent / "models.toml"
 # The analysis card owns which repo a slug serves (`model`), the context it holds (`context_tokens` → MAX_KV_SIZE), and the endpoint analysis dials (`base_url` → bind host/port); the server derives all three at boot, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
 # The card is read as a file from config/cards/ under the deployment root, never through the conversation layer.
 def card_file(slug: str) -> Path:
-    from locus.analysis.model.cards import CARDS_DIR
-    from locus.evidence.deployment import CONFIG_DIR, deployment_root
+    from locus.analysis.model.cards import cards_dir
 
-    return deployment_root() / CONFIG_DIR / CARDS_DIR / f"{slug}.toml"
+    return cards_dir() / f"{slug}.toml"
 
 
 def _card(slug: str) -> dict | None:
+    """The slug's card file, its `model` read the way analysis reads it (cards.local_model)."""
+    from locus.analysis.model.cards import local_model
+
     path = card_file(slug)
-    return tomllib.loads(path.read_text()) if path.exists() else None
+    if not path.exists():
+        return None
+    card = tomllib.loads(path.read_text())
+    if isinstance(card.get("model"), str):
+        card["model"] = local_model(card["model"])
+    return card
+
+
+def serving_env(slug: str) -> dict[str, str]:
+    """The environment the bundled server serves `slug` under, over what it inherits: models.toml's env for the slug and the card's context as MAX_KV_SIZE. The boot applies it to the server; the count (count.py) runs upstream under it, so both read the same settings."""
+    models = tomllib.loads(MODELS_TOML.read_text())
+    if slug not in models:
+        raise ValueError(
+            f"{slug!r} has no entry in {MODELS_TOML} — no serving env is declared "
+            f"for it, so the bundled server does not serve it"
+        )
+    card = _card(slug)
+    if card is None:
+        raise ValueError(f"no card for slug {slug!r} at {card_file(slug)}")
+    return {**models[slug]["env"], "MAX_KV_SIZE": str(card["context_tokens"])}
+
+
+def undeclared_count_env(slug: str) -> list[str]:
+    """The count-affecting variables (count.COUNT_ENV) this process inherits that `slug`'s serving env does not declare. The count prices with the declared values alone, so a value only the server's shell held would make every price silently wrong."""
+    from .count import COUNT_ENV
+
+    declared = serving_env(slug)
+    return sorted(key for key in COUNT_ENV if key in os.environ and key not in declared)
 
 
 def bind_from_card(card: dict) -> tuple[str, int]:
@@ -710,7 +739,15 @@ def main() -> None:
             f"usage: locus-mlx-serve <model-slug>; available: {sorted(models)}"
         )
     slug = sys.argv[1]
-    config = models[slug]
+    undeclared = undeclared_count_env(slug)
+    if undeclared:
+        raise SystemExit(
+            f"{', '.join(undeclared)} set in the environment and not declared for "
+            f"{slug!r} in {MODELS_TOML}: each changes how a request is counted, and "
+            f"pricing counts with the declared serving env alone (count.py), so the "
+            f"server would count differently from every price. Declare it under "
+            f'["{slug}".env] or unset it, then boot.'
+        )
 
     cap = _wired_cap_bytes()
     import mlx.core as mx
@@ -732,10 +769,7 @@ def main() -> None:
     os.environ["MLX_VLM_PRELOAD_MODEL"] = hf_repo
     # The declarations — models.toml's env and the card's KV budget — beat an inherited shell
     # value, loudly. An override is applied by editing the declaration.
-    for key, value in {
-        **config["env"],
-        "MAX_KV_SIZE": str(card["context_tokens"]),
-    }.items():
+    for key, value in serving_env(slug).items():
         inherited = os.environ.get(key)
         if inherited is not None and inherited != value:
             logger.warning(

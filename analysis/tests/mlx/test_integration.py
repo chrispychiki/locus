@@ -363,3 +363,92 @@ def test_generation_speed_floor():
         f"{timings['predicted_n']} tokens decoded at "
         f"{timings['predicted_per_second']:.1f} tok/s — generation is crawling"
     )
+
+
+def test_the_in_process_count_is_the_servers_count(tmp_path):
+    """Pricing and the pre-send check count with the server's own code in the client's process (mlx/count.py). Over every shape an analysis sends — a system prompt, text interleaved with images of assorted sizes, the tool declaration, an assistant tool call answered by a tool result, a thinking replay — the count is the prompt_tokens the server reports."""
+    from locus.analysis.mlx.count import prompt_tokens
+    from locus.analysis.prompts import request_screenshots_tool
+
+    paths = []
+    for i, (size, color) in enumerate(
+        [((1280, 800), "red"), ((390, 663), "green"), ((733, 2100), "blue")]
+    ):
+        path = tmp_path / f"{i}.png"
+        Image.new("RGB", size, COLORS[color]).save(path)
+        paths.append(path)
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "request_screenshots",
+            "arguments": json.dumps({"screenshots": [{"timestamp": "00:01.000"}]}),
+        },
+    }
+    body = {
+        "model": loaded_model(),
+        "messages": [
+            {"role": "system", "content": "You read screenshots."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first:"},
+                    image_part(paths[0]),
+                    {"type": "text", "text": "second:"},
+                    image_part(paths[1]),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "I should look closer.",
+                "tool_calls": [call],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "rendered 1"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "screenshot at 00:01.000:"},
+                    image_part(paths[2]),
+                ],
+            },
+        ],
+        "tools": [{"type": "function", "function": request_screenshots_tool()}],
+        "max_tokens": 16,
+        "enable_thinking": True,
+        "context_management": [],
+    }
+    served = requests.post(CHAT, json=body, timeout=TIMEOUT)
+    served.raise_for_status()
+    assert prompt_tokens(body) == served.json()["usage"]["prompt_tokens"]
+
+
+def test_the_clients_pre_send_count_is_what_the_server_reports(tmp_path):
+    """The client counts each request as it will send it (OpenAICompatConversation.wire_request), its own replay of the model's reply and thinking included, so before every call the count it refuses by and context_remaining reads is the number the server then reports."""
+    from locus.analysis.mlx.count import prompt_tokens
+    from locus.analysis.model.cards import load_card
+    from locus.analysis.model.openai_compat import OpenAICompatConversation
+    from locus.analysis.prompts import request_screenshots_tool
+
+    card = load_card("qwen3.6-35b-a3b-6bit")
+    card.update(max_tokens=256, thinking_budget=128)
+    conversation = OpenAICompatConversation(
+        "You read screenshots.", card=card, record_dir=tmp_path / "record"
+    )
+    tools = [request_screenshots_tool()]
+    big = tmp_path / "big.png"
+    Image.new("RGB", (2560, 1323), COLORS["purple"]).save(big)
+    conversation.add_user_text("What color is this?")
+    conversation.add_user_image(str(smiley_image(tmp_path, count=1, color="red")))
+    conversation.add_user_image(str(big), pushed=True)
+    for follow_up in (None, "And in one word, its shape?"):
+        if follow_up:
+            conversation.add_user_text(follow_up)
+        counted = prompt_tokens(conversation.wire_request(tools))
+        response = conversation.get_response(label="answer", tools=tools)
+        assert counted == response.usage_metadata["prompt_tokens"]
+        for call in response.tool_calls:
+            conversation.add_tool_result(call.id, "no screenshots in this test")
+        assert conversation.context_remaining() == card["context_tokens"] - card[
+            "max_tokens"
+        ] - prompt_tokens(conversation.wire_request(tools))

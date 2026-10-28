@@ -127,11 +127,11 @@ def price_analysis(
     site_contexts: dict[str, str],
     screenshot_interval_ms: int = SCREENSHOT_INTERVAL_MS,
 ) -> dict:
-    """The model-payload priced, exactly, spending nothing — the default `locus analyze` invocation, over a resolved window (window.resolve_window). The counted payload is byte-for-byte what a run would send: the same contract, composition, activity-screenshots, and question."""
+    """The model-payload priced, exactly, spending nothing — the default `locus analyze` invocation, over a resolved window (window.resolve_window). The counted payload is byte-for-byte what a run would send: the same contract, composition, activity-screenshots, question, and tool declaration."""
 
-    def prompts(labels: list[str]) -> tuple[str, str]:
+    def prompts(labels: list[str]) -> tuple[str, str, list[dict]]:
         system, task, _ = _contract(labels, question)
-        return system, task
+        return system, task, [request_screenshots_tool()]
 
     return price_payload(
         conn,
@@ -235,45 +235,65 @@ def _serve_round(
             wanted.append((label, ts))
             served.add((label, ts))
 
-    # The context is the only cap, and here it is exactly knowable: the
-    # backend says what it has left and what a screenshot costs it.
-    screenshots, refused = [], 0
-    room = conv.context_remaining()
+    rendered = []
     try:
-        for i, (label, ts) in enumerate(wanted):
-            screenshot = renderer.capture(label, ts)
-            cost = conv.image_tokens(screenshot.path)
-            if cost > room:
-                refused = len(wanted) - i
-                if (label, ts) not in sent:
-                    Path(screenshot.path).unlink()
-                break
-            room -= cost
-            sent.add((label, ts))
-            screenshots.append((label, ts, screenshot))
+        for label, ts in wanted:
+            rendered.append((label, ts, renderer.capture(label, ts)))
             if on_screenshot is not None:
-                on_screenshot(len(screenshots))
+                on_screenshot(len(rendered))
     finally:
         renderer.release()
 
-    if screenshots:
-        n = len(screenshots)
-        note = f"Rendered {n} screenshot{'' if n == 1 else 's'}; see the next message."
+    def note(n: int) -> str:
+        refused = len(rendered) - n
+        if not n:
+            return "No screenshots could be sent — no room left in the context. Answer from what you have."
+        text = f"Rendered {n} screenshot{'' if n == 1 else 's'}; see the next message."
         if duplicate:
-            note += " A moment requested more than once was rendered once."
+            text += " A moment requested more than once was rendered once."
         if refused:
-            note += f" {refused} more could not be sent — no room left in the context; answer from what you have."
-    else:
-        note = "No screenshots could be sent — no room left in the context. Answer from what you have."
-    for call in response.tool_calls:
-        conv.add_tool_result(call.id, note)
+            text += f" {refused} more could not be sent — no room left in the context; answer from what you have."
+        return text
 
-    if screenshots:
-        conv.add_user_text("Requested screenshots:")
-    for label, ts, screenshot in screenshots:
-        stamp = format_offset(ts, start_ms, label if multi else None)
-        conv.add_user_text(f"screenshot at {stamp}:")
-        conv.add_user_image(screenshot.path)
+    def round_parts(n: int) -> list[tuple]:
+        """The round as it is appended when n of the rendered screenshots are served: the tool calls answered, then the screenshots, each under its moment."""
+        parts = [("tool", call.id, note(n)) for call in response.tool_calls]
+        if n:
+            parts.append(("text", "Requested screenshots:"))
+        for label, ts, screenshot in rendered[:n]:
+            stamp = format_offset(ts, start_ms, label if multi else None)
+            parts += [("text", f"screenshot at {stamp}:"), ("image", screenshot.path)]
+        return parts
+
+    # The context is the only cap, and here it is exactly knowable: the backend
+    # counts the next request with the whole round in place — the tool answers,
+    # the labels and the screenshots — so the round serves the most screenshots
+    # whose turn fits.
+    served_n = len(rendered)
+    if conv.context_remaining(round_parts(served_n)) < 0:
+        fits, over = 0, served_n
+        while over - fits > 1:
+            mid = (fits + over) // 2
+            if conv.context_remaining(round_parts(mid)) >= 0:
+                fits = mid
+            else:
+                over = mid
+        served_n = fits
+
+    screenshots = rendered[:served_n]
+    for label, ts, screenshot in rendered[served_n:]:
+        if (label, ts) not in sent:
+            Path(screenshot.path).unlink()
+    for label, ts, _ in screenshots:
+        sent.add((label, ts))
+    for part in round_parts(served_n):
+        if part[0] == "tool":
+            conv.add_tool_result(part[1], part[2])
+        elif part[0] == "text":
+            conv.add_user_text(part[1])
+        else:
+            conv.add_user_image(part[1])
+    refused = len(rendered) - served_n
     return screenshots, refused
 
 

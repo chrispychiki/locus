@@ -1,7 +1,7 @@
 """Model cards — caller-side model facts, nothing else.
 
 The roster is `config/cards/` under the deployment root: one TOML file per card, the file's stem the card's name — the deployment's name for the model, the name `locus analyze --model` and the spend ledger speak.
-Every card declares `model`, the id its client speaks to the backend — the repo an openai-compatible server loads, the model a Gemini call addresses — and no two cards declare it alike: a card is 1:1 with its model, held by refusal at load, which is what lets a card's name stand for its model everywhere.
+Every card declares `model`, the id its client speaks to the backend — the repo or local directory an openai-compatible server loads (a relative directory is the deployment root's), the model a Gemini call addresses — and no two cards declare it alike: a card is 1:1 with its model, held by refusal at load, which is what lets a card's name stand for its model everywhere.
 Which card a bare invocation runs on is the one marked `default = true`. More than one marked card refuses at load; none marked refuses only at the moment something asks for the default.
 
 Every card names the client that speaks to it — `conversation`, one of the names factory.py's registry holds (GEMINI for Gemini's own API, OPENAI_COMPATIBLE for an OpenAI-compatible server at the card's `base_url`).
@@ -18,8 +18,8 @@ The server is upstream mlx-vlm behind an operational layer; it holds no opinion 
 Resize from new measurements, never by feel.
 
 An openai-compatible card also declares its `family`, `max_image_tokens`, and `base_url`.
-The composition plane's counting and resize arithmetic (budget.py: the pinned tokenizer, the smart_resize closed form) replicates exactly one model family's wire behavior; `family` states the card's membership, and a card outside SUPPORTED_FAMILIES is refused at load.
-`max_image_tokens` is a table keyed by an analysis's two kinds of screenshot — `activity_screenshots` (the pushed set) and `pulled_screenshots` (the served pulls) — each the per-image token ceiling the backend realizes at the wire for that kind; pricing counts the window's screenshots at the activity ceiling, so window capacity follows the card.
+The bundled server bounds its memory with patches bound to one model family's modules (mlx/fused_attention.py, mlx/vision_chunking.py), so a model outside that family would be served without those bounds, and the count's per-image shortcut has been judged on that family's processor alone (mlx/count.py JUDGED_PROCESSORS); `family` states the card's membership, and a card outside SUPPORTED_FAMILIES is refused at load.
+`max_image_tokens` is a table keyed by an analysis's two kinds of screenshot — `activity_screenshots` (the pushed set) and `pulled_screenshots` (the served pulls) — each the most tokens one image of that kind may add to the server's count of a request, which the backend realizes by shrinking the image; pricing counts the window's screenshots at the activity ceiling, so window capacity follows the card.
 `base_url` is the OpenAI-compatible endpoint the backend dials — and the one home for that address: the bundled mlx server derives its bind host/port from the same field at boot, so analysis and the server cannot drift.
 Gemini cards carry none of these: their image dial is `media_resolution`, the same table keyed by the same two kinds, mapping each to the tier it rides — flat-priced per image within a tier, with the choosing rationale beside the dial in the card file.
 
@@ -60,6 +60,15 @@ def cards_dir() -> Path:
     return deployment_root() / CONFIG_DIR / CARDS_DIR
 
 
+def local_model(model: str) -> str:
+    """The model an openai-compatible card names, as every reader takes it — the server loads it, the count reads it, the wire and the record carry it: a Hub repo id, or a local directory. A relative path is the deployment's, so it resolves against the deployment root the roster lives in (the roster's own, so a card and the directory it names always come from one deployment), whatever the working directory; the test is upstream's own (utils.get_model_path) — a path that exists is local, anything else is a repo id."""
+    root = cards_dir().parent.parent
+    path = Path(model)
+    if not path.is_absolute() and (root / path).exists():
+        return str(root / path)
+    return model
+
+
 def _card_file(name: str) -> Path:
     return cards_dir() / f"{name}.toml"
 
@@ -85,7 +94,9 @@ def _cards() -> dict:
                 f"every card names the model its client speaks to the "
                 f"backend; the filename is a label and never stands in for it"
             )
-        by_model.setdefault(declared, []).append(name)
+        if card.get("conversation") == OPENAI_COMPATIBLE:
+            card["model"] = local_model(declared)
+        by_model.setdefault(card["model"], []).append(name)
         marked = card.get("default")
         if marked is not None and not isinstance(marked, bool):
             raise ValueError(
@@ -303,13 +314,12 @@ def load_card(name: str) -> dict:
         )
     if card.get("family") not in SUPPORTED_FAMILIES:
         raise ValueError(
-            f"card '{name}' declares family {card.get('family')!r}; the "
-            f"composition plane's counting and resize arithmetic (the pinned "
-            f"tokenizer, the smart_resize closed form) implements "
-            f"{sorted(SUPPORTED_FAMILIES)} — a model outside those families "
-            f"would silently be priced and resized with another model's math. "
-            f"Declare family membership only for a model whose tokenizer and "
-            f"vision preprocessor match the family's."
+            f"card '{name}' declares family {card.get('family')!r}; the bundled "
+            f"server's memory bounds (mlx/fused_attention.py, mlx/vision_chunking.py) "
+            f"patch {sorted(SUPPORTED_FAMILIES)}'s modules, and the count's per-image "
+            f"shortcut is judged on that family's processor (mlx/count.py) — a model "
+            f"outside those families would be served without the bounds. Declare "
+            f"family membership only for a model those patches reach."
         )
     if "max_image_tokens" not in card:
         raise ValueError(
