@@ -21,31 +21,57 @@ from .model.protocol import Conversation
 from .select_screenshots import SCREENSHOT_INTERVAL_MS, screenshot_moments
 
 
-def image_geometry(
-    model: str, width: int, height: int, max_image_tokens: int
-) -> tuple[int, int]:
-    """The geometry a screenshot is actually sent at under the card's per-image token ceiling — the one place the ceiling turns into pixels: the local backend resizes by it, and pricing counts what it returns. An image's cost is the server's own count of it (mlx/count.py image_tokens), so the ceiling bounds everything the image adds to the prompt. A screenshot already under the ceiling passes untouched (never upscaled); over it, the screenshot scales down preserving aspect to the largest geometry whose cost fits. The model's processor never encodes an image below its own minimum size, so a ceiling under what the smallest image costs is unrealizable and fails loud."""
-    from .mlx.count import image_tokens
+def image_geometry(model: str, width: int, height: int, tokens: int) -> tuple[int, int]:
+    """The pixel size of a screenshot of a `width` x `height` viewport on a local card whose image_tokens value for the screenshot's kind is `tokens`: the viewport scaled by one factor and rounded down onto the processor's grid (mlx/count.py grid), at the largest size whose cost in the server's own count, start and end markers included, fits the value. This is the only place that value becomes pixels: the renderer draws at this size, and pricing counts it. The processor encodes an on-grid image at its own size (mlx/count.py processed_size). A value the processor cannot produce raises: one below the cost of the smallest image it encodes, or above the cost of the largest it encodes at this viewport's proportions."""
+    from .mlx.count import grid, image_tokens, processed_size
 
-    floor_tokens = image_tokens(model, 1, 1)
-    if max_image_tokens < floor_tokens:
-        raise ValueError(
-            f"per-image token ceiling {max_image_tokens} is below the "
-            f"{floor_tokens} tokens the model's smallest image costs — no "
-            f"geometry realizes it; raise max_image_tokens in the card"
+    cell = grid(model)
+
+    def scaled(cells: int) -> tuple[int, int]:
+        scale = math.sqrt(cells * cell * cell / (width * height))
+        return (
+            max(cell, math.floor(width * scale / cell) * cell),
+            max(cell, math.floor(height * scale / cell) * cell),
         )
-    cost = image_tokens(model, width, height)
-    if cost <= max_image_tokens:
-        return width, height
-    scale = math.sqrt(max_image_tokens / cost)
-    sent_w = max(1, math.floor(width * scale))
-    sent_h = max(1, math.floor(height * scale))
-    # The processor rounds each side to its patch grid, which can round the cost back up
-    # past the ceiling; step down until it fits.
-    while image_tokens(model, sent_w, sent_h) > max_image_tokens:
-        sent_w = max(1, math.floor(sent_w * 0.98))
-        sent_h = max(1, math.floor(sent_h * 0.98))
-    return sent_w, sent_h
+
+    def encoded(cells: int) -> bool:
+        # Checked before any cost is taken, so no image larger than the processor encodes is built.
+        size = scaled(cells)
+        sized = processed_size(model, *size)
+        return sized[0] * sized[1] >= size[0] * size[1]
+
+    def fits(cells: int) -> bool:
+        return encoded(cells) and image_tokens(model, *scaled(cells)) <= tokens
+
+    below = (
+        f"image_tokens {tokens} is below the cost of the smallest {width}x{height} "
+        f"screenshot the model's processor encodes without enlarging it; raise "
+        f"image_tokens in the card"
+    )
+    if not fits(1):
+        raise ValueError(below)
+    # Cost and pixel count both grow with the cell count, so doubling and then bisecting finds
+    # the largest count that fits.
+    low, high = 1, 2
+    while fits(high):
+        low, high = high, high * 2
+    while high - low > 1:
+        mid = (low + high) // 2
+        if fits(mid):
+            low = mid
+        else:
+            high = mid
+    size = scaled(low)
+    if processed_size(model, *size) != size:
+        raise ValueError(below)
+    if not encoded(low + 1) and image_tokens(model, *size) < tokens:
+        raise ValueError(
+            f"image_tokens {tokens} is above the cost of the largest {width}x{height} "
+            f"screenshot the model's processor encodes: it shrinks anything larger "
+            f"than {size[0]}x{size[1]}, which costs {image_tokens(model, *size)}; "
+            f"lower image_tokens in the card to at most {image_tokens(model, *size)}"
+        )
+    return size
 
 
 class TallyConversation(Conversation):
@@ -68,12 +94,17 @@ class TallyConversation(Conversation):
             "a tally conversation prices a window, not an image — the backend's own cost model does that"
         )
 
+    def screenshot_size(self, width: int, height: int, *, pushed: bool) -> tuple:
+        raise RuntimeError(
+            "a tally conversation composes placeholders, not screenshots; the backend's client sizes screenshots"
+        )
+
     def context_remaining(self) -> int:
         raise RuntimeError(
             "a tally conversation holds no context — pricing compares its total against the budget itself"
         )
 
-    def _add_tool_result(self, call_id: str, content: str) -> None:
+    def _add_tool_result(self, call_id: str, parts: list[tuple]) -> list[str]:
         raise RuntimeError("a tally conversation only composes, never converses")
 
     def _get_response(self, **kwargs):
@@ -131,7 +162,7 @@ class CostModel:
 
 
 def _local_count(model: str) -> Callable[..., list[Count]]:
-    """A local card's payload counted by its server's own code (mlx/count.py): the window composed into the real client, so the request is the one a run sends, with each activity-screenshot stood in for by a blank image of the size the renderer will give it — the slice's viewport at that moment (slices.viewport_at) — which the client then shrinks under the card's ceiling exactly as it shrinks the real one. The count reads an image's size, never its pixels."""
+    """A local card's payload counted by its server's own code (mlx/count.py): the window composed into the real client, so the request is the one a run sends, with each activity-screenshot replaced by a blank image of the size the renderer will draw it at: the client's screenshot_size of the slice's viewport at that moment (slices.viewport_at). The count reads an image's size, not its pixels. The pulled kind is also sized at every viewport a pull could be drawn at, so a card value the processor cannot produce fails the price instead of a pull mid-run."""
 
     def one(conn, window, contract, moments, site_contexts) -> Count:
         import tempfile
@@ -145,17 +176,30 @@ def _local_count(model: str) -> Callable[..., list[Count]]:
 
         system_prompt, task, tools = contract
         labels = {s.slice_id: s.label for s in window.slices}
+        conv = make_conversation(model, system_prompt, record_dir=None)
+        viewports = {
+            s.slice_id: viewport_events(conn, s.slice_id) for s in window.slices
+        }
+        for s in window.slices:
+            events = viewports[s.slice_id]
+            for ts in [s.screenshot_start_ts] + [
+                e["timestamp"]
+                for e in events
+                if s.screenshot_start_ts < e["timestamp"] <= s.end_ts
+            ]:
+                conv.screenshot_size(*viewport_at(events, ts), pushed=False)
         with tempfile.TemporaryDirectory(prefix="locus_price_") as tmp:
             shots = {}
             for slice_id, timestamps in moments.items():
-                events = viewport_events(conn, slice_id)
+                events = viewports[slice_id]
                 for ts in timestamps:
-                    width, height = viewport_at(events, ts)
+                    width, height = conv.screenshot_size(
+                        *viewport_at(events, ts), pushed=True
+                    )
                     blank = Path(tmp) / f"{width}x{height}.png"
                     if not blank.exists():
                         Image.new("RGB", (width, height)).save(blank)
                     shots[(labels[slice_id], ts)] = blank
-            conv = make_conversation(model, system_prompt, record_dir=None)
             manifest = compose_window(
                 conn, conv, window, site_contexts=site_contexts, screenshots=shots
             )

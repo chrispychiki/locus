@@ -2,17 +2,17 @@
 
 Client and server share a filesystem: images travel as plain absolute paths and the server reads them from disk, so request size never bounds visual context. Contracts with the locus-mlx server (upstream mlx-vlm behind a thin operational layer), preserved exactly:
 
-- consecutive user text/images merge into one user message (the chat template expects a single interleaved user turn);
+- consecutive user text/images merge into one user message (the chat template expects a single interleaved user turn), and a tool's reply is one tool message: its text alone, or its text and images interleaved in order (the bundled server carries a tool message's images to the template, mlx/chat_turns.py);
 - the conversation only ever grows: every part is appended ahead of the call that sends it and stays, so each request's token sequence extends the last one's rather than rewriting its middle — the shape any server-side prefix cache reuses on, where one is enabled (analysis/README.md § Throughput, caching, concurrency);
-- thinking arrives as `reasoning` on the message (`reasoning_content` is read first for compatibility); assistant replay turns carry both keys, and the server hands `reasoning_content` to the chat template, which renders it by the model family's own convention (Qwen renders it only for an assistant turn that comes after the conversation's last user turn, so a reply the conversation has since asked something about replays as its answer alone);
+- thinking arrives as `reasoning` on the message (`reasoning_content` is read first for compatibility); every assistant turn replays with its thinking under both keys, and the server hands `reasoning_content` to the chat template, which renders it by the model family's own convention (Qwen's renders only the turns since the conversation's last user message unless the card's `chat_template_kwargs` sets preserve_thinking, which renders them all);
 - the default timeout is None — infinite — because local generation can outrun any fixed budget;
 - every request is counted before send and refused loud when the count plus max_tokens exceeds the card's context_tokens. The count is the server's own, run here by the server's own code over the request as it will be sent (mlx/count.py), so the refusal, context_remaining and pricing (budget.py) all read the number the server will report. The server enforces the same bound when MAX_KV_SIZE is set; the client refusal is the informative half, made before a doomed request waits on admission;
 - every request sends `context_management: []`. Upstream's chat handler otherwise compacts the conversation: it clamps max_tokens to the context left and, past the limit, replaces the conversation's head with a model-written summary. With it, the conversation is served exactly as composed, and a request over the limit meets the server's own refusal;
-- images are carried under the card's per-image token ceilings (`max_image_tokens`, one per kind of screenshot — the pushed activity set and the served pulls), realized by _within_ceiling;
+- the renderer draws each screenshot at the size screenshot_size gives its viewport from the card's `image_tokens` value for its kind, activity or pulled, and that file is what is sent;
 - every request streams (`stream_options.include_usage`) and is reassembled here into the same persisted record a non-streamed call would leave: content and reasoning deltas concatenated, tool-call deltas merged by index, usage from the terminal usage chunk. Streaming is what makes a long generation legible while it runs — the deltas are the run's progress, and the server serves one request at a time from admission to the end of its response;
 - that terminal usage chunk carries a `timings` sibling to `usage` (prompt/generation token rates and ms, cache hits, peak model memory) that the openai SDK does not model; it survives as `model_extra` and is folded into the persisted usage record — the local analogue of Gemini's usage breakdown. The response's `x-locus-request` header is folded in too (`server_request`): it is the id keying the server's per-request memory telemetry, so the persisted record names its own rows in the server's memory log.
 
-Config is stated, never defaulted: the conversation is constructed from a model card (cards.py) and sends the model, the thinking budget, and every sampling value explicitly on every request — thinking is the backend's one mode, and enable_thinking rides the wire as an explicit true rather than falling to an upstream default. The persisted payload is therefore the complete record of the generation intent — nothing the server applies is absent from it. Omitted fields would fall to upstream's own defaults — the checkpoint's generation config, then upstream's schema.
+Config is stated, never defaulted: the conversation is constructed from a model card (cards.py) and sends the model, the thinking budget, every sampling value and the card's chat template options explicitly on every request — thinking is the backend's one mode, and enable_thinking rides the wire as an explicit true rather than falling to an upstream default. The persisted payload is therefore the complete record of the generation intent — nothing the server applies is absent from it. Omitted fields would fall to upstream's own defaults — the checkpoint's generation config, then upstream's schema.
 
 Payload persistence is inherited from the Conversation protocol layer — the record home is stated at construction (record_dir), never optional.
 """
@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .protocol import Conversation, DryRun, Response, json_schema_of
+from .protocol import Conversation, DryRun, Response, json_schema_of, tool_parts
 
 NATIVE_PARAMS = {"temperature", "top_p", "presence_penalty"}
 
@@ -67,14 +67,14 @@ class OpenAICompatConversation(Conversation):
         self.model = card["model"]
         self.thinking_budget = card["thinking_budget"]
         self.max_tokens = card["max_tokens"]
-        self.max_image_tokens = dict(card["max_image_tokens"])
+        self.image_tokens_by_kind = dict(card["image_tokens"])
         self.context_tokens = card["context_tokens"]
         self.sampling = dict(card["sampling"])
+        self.template_options = dict(card.get("chat_template_kwargs", {}))
         self.card_name = card.get("name", card["model"])
         self.prices = card.get("pricing")
         self.dry_run = dry_run
         self.contents: list[dict] = []
-        self._tmpdir: str | None = None
         self._last_shape: tuple = (None, None)
 
     def _user_parts(self) -> list[dict]:
@@ -88,61 +88,37 @@ class OpenAICompatConversation(Conversation):
         self._user_parts().append({"type": "text", "text": text})
 
     def _add_user_image(self, image_path: str, pushed: bool) -> str:
-        """The image rides under its kind's ceiling — activity_screenshots for a pushed image, pulled_screenshots for everything else."""
+        """The image is sent as the file: the renderer drew it at its kind's size (screenshot_size)."""
+        part = self._image_part(image_path)
+        self._user_parts().append(part)
+        return part["image_url"]["url"]
+
+    def _image_part(self, image_path: str) -> dict:
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"image not found: {image_path}")
-        url = self._within_ceiling(path, self._ceiling(pushed))
-        self._user_parts().append(
-            {
-                "type": "image_url",
-                "image_url": {"url": url},
-            }
-        )
-        return url
+        return {"type": "image_url", "image_url": {"url": str(path.resolve())}}
 
-    def _ceiling(self, pushed: bool) -> int:
-        return self.max_image_tokens[
-            "activity_screenshots" if pushed else "pulled_screenshots"
-        ]
-
-    def _within_ceiling(self, path: Path, ceiling: int) -> str:
-        """The card's per-image token ceiling for the image's kind, realized: an image under it is sent as its own file untouched; over it, the server is handed a physically smaller copy at the geometry the ceiling holds (budget.image_geometry — the same rule pricing counts, so the price is the price of the file sent). The server has no per-image API knob, so a smaller file is the only realization. The copy lives in a temp dir tied to this conversation's lifetime; the image it came from stays in the analysis directory and the persisted record names the copy actually sent, so the copy itself carries nothing the audit trail needs."""
-        import shutil
-        import tempfile
-        import weakref
-
-        from PIL import Image
-
+    def screenshot_size(self, width: int, height: int, *, pushed: bool) -> tuple:
+        """The pixel size of a screenshot of a viewport this size, from the card's image_tokens value for its kind: activity_screenshots when pushed, pulled_screenshots for a pull (budget.image_geometry, which pricing also uses)."""
         from ..budget import image_geometry
 
-        with Image.open(path) as img:
-            geometry = image_geometry(self.model, *img.size, ceiling)
-            if geometry == img.size:
-                return str(path.resolve())
-            shrunk = img.resize(geometry, Image.LANCZOS)
-            if self._tmpdir is None:
-                self._tmpdir = tempfile.mkdtemp(prefix="locus_images_")
-                weakref.finalize(self, shutil.rmtree, self._tmpdir, True)
-            out = Path(self._tmpdir) / f"{path.stem}_{ceiling}tok{path.suffix}"
-            shrunk.save(out)
-            return str(out)
+        kind = "activity_screenshots" if pushed else "pulled_screenshots"
+        return image_geometry(
+            self.model, width, height, self.image_tokens_by_kind[kind]
+        )
 
     def image_tokens(self, image_path: str) -> int:
-        """What a pull costs: the server's own count of the image at the geometry the pulled_screenshots ceiling sends it at. The pushed set is never priced here — it is priced as a window before turn 1 (budget.price_payload), at the activity ceiling."""
+        """What a pull costs: the server's own count of the image file, which was drawn at its kind's size. The pushed set is priced as a window before turn 1 (budget.price_payload), not here."""
         from PIL import Image
 
-        from ..budget import image_geometry
         from ..mlx.count import image_tokens
 
         with Image.open(image_path) as image:
-            return image_tokens(
-                self.model,
-                *image_geometry(self.model, *image.size, self._ceiling(pushed=False)),
-            )
+            return image_tokens(self.model, *image.size)
 
     def context_remaining(self, appending=()) -> int:
-        """What the model's context would still hold for this conversation to grow into, were `appending` added: context_tokens minus max_tokens (generation shares the context here, so the next call's ceiling stays reserved) minus the next request — the conversation with those parts, sent the way its last call was sent — counted by the server's own code (mlx/count.py). The parts are appended as add_* appends them, so the template renders them in place (a reply's thinking, for one, is dropped once a user turn follows it), then taken back off."""
+        """What the model's context would still hold for this conversation to grow into, were `appending` added: context_tokens minus max_tokens (generation shares the context here, so the next call's ceiling stays reserved) minus the next request — the conversation with those parts, sent the way its last call was sent — counted by the server's own code (mlx/count.py). The parts are appended as add_* appends them, so the template renders them in place, then taken back off."""
         if not appending:
             return self.context_tokens - self.max_tokens - self._prompt_tokens()
         import copy
@@ -155,7 +131,7 @@ class OpenAICompatConversation(Conversation):
                 elif part[0] == "image":
                     self._add_user_image(part[1], pushed=False)
                 elif part[0] == "tool":
-                    self._add_tool_result(part[1], part[2])
+                    self._add_tool_result(part[1], tool_parts(part[2]))
                 else:
                     raise ValueError(f"unknown part kind {part[0]!r}")
             return self.context_tokens - self.max_tokens - self._prompt_tokens()
@@ -177,10 +153,25 @@ class OpenAICompatConversation(Conversation):
             "thoughts_tokens": 0,
         }
 
-    def _add_tool_result(self, call_id: str, content: str) -> None:
+    def _add_tool_result(self, call_id: str, parts: list[tuple]) -> list[str]:
+        """One tool message: a reply that is text alone rides as its string; one with images rides as its parts in order."""
+        if [kind for kind, _ in parts] == ["text"]:
+            content = parts[0][1]
+        else:
+            content = [
+                {"type": "text", "text": value}
+                if kind == "text"
+                else self._image_part(value)
+                for kind, value in parts
+            ]
         self.contents.append(
             {"role": "tool", "tool_call_id": call_id, "content": content}
         )
+        if isinstance(content, str):
+            return []
+        return [
+            item["image_url"]["url"] for item in content if item["type"] == "image_url"
+        ]
 
     def _wire_messages(self) -> list[dict]:
         messages = []
@@ -200,6 +191,8 @@ class OpenAICompatConversation(Conversation):
                 "context_management": [],
             },
         }
+        if self.template_options:
+            params["extra_body"]["chat_template_kwargs"] = dict(self.template_options)
         for key, value in self.sampling.items():
             if key in NATIVE_PARAMS:
                 params[key] = value
@@ -219,7 +212,7 @@ class OpenAICompatConversation(Conversation):
         return params
 
     def sent_images(self) -> list[str]:
-        """The file each image part sends, in order — the shrunk copy where the ceiling made one."""
+        """The file each image part sends, in order."""
         return [
             part["image_url"]["url"]
             for message in self.contents
@@ -368,12 +361,10 @@ class OpenAICompatConversation(Conversation):
             tool_calls=tool_calls,
         )
 
-        if tool_calls:
-            self.contents.append(
-                {"role": "assistant", "content": text, "tool_calls": wire_calls}
-            )
-        elif response.text:
-            turn: dict = {"role": "assistant", "content": response.text}
+        if tool_calls or response.text:
+            turn: dict = {"role": "assistant", "content": text}
+            if tool_calls:
+                turn["tool_calls"] = wire_calls
             if response.thoughts_text:
                 turn["reasoning_content"] = response.thoughts_text
                 turn["reasoning"] = response.thoughts_text
@@ -406,6 +397,11 @@ class OpenAICompatConversation(Conversation):
             "max_tokens": self.max_tokens,
             "context_tokens": self.context_tokens,
             **self.sampling,
+            **(
+                {"chat_template_kwargs": self.template_options}
+                if self.template_options
+                else {}
+            ),
         }
 
     @property

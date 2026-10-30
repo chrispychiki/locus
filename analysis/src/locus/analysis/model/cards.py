@@ -17,9 +17,10 @@ Config is a client-side notion only: every value is sent explicitly on every req
 The server is upstream mlx-vlm behind an operational layer; it holds no opinion of ours. max_tokens caps total generation, thinking included, and is sized from measurement: thinking_budget plus 8192 of visible output — every visible output measured in operation (answers, verdict batches up to 29 claims, claim-extraction JSON) sits under ~2.5k tokens, so 8192 is ~3x the observed maximum.
 Resize from new measurements, never by feel.
 
-An openai-compatible card also declares its `family`, `max_image_tokens`, and `base_url`.
+An openai-compatible card also declares its `family`, `image_tokens`, and `base_url`.
 The bundled server bounds its memory with patches bound to one model family's modules (mlx/fused_attention.py, mlx/vision_chunking.py), so a model outside that family would be served without those bounds, and the count's per-image shortcut has been judged on that family's processor alone (mlx/count.py JUDGED_PROCESSORS); `family` states the card's membership, and a card outside SUPPORTED_FAMILIES is refused at load.
-`max_image_tokens` is a table keyed by an analysis's two kinds of screenshot — `activity_screenshots` (the pushed set) and `pulled_screenshots` (the served pulls) — each the most tokens one image of that kind may add to the server's count of a request, which the backend realizes by shrinking the image; pricing counts the window's screenshots at the activity ceiling, so window capacity follows the card.
+`image_tokens` is a table keyed by an analysis's two kinds of screenshot, `activity_screenshots` (the pushed set) and `pulled_screenshots` (the served pulls). Each value is the token count of one screenshot of that kind at any viewport: the renderer draws the screenshot at the largest size on the model's grid whose cost in the server's count fits the value (budget.image_geometry). Pricing counts the window's screenshots at the activity value, so how much a window holds follows the card.
+An openai-compatible card may also declare `chat_template_kwargs`, a table of options to the model's chat template, sent verbatim on every request in the field of that name, the one vLLM and SGLang take; the bundled server hands it to the template (mlx/chat_turns.py).
 `base_url` is the OpenAI-compatible endpoint the backend dials — and the one home for that address: the bundled mlx server derives its bind host/port from the same field at boot, so analysis and the server cannot drift.
 Gemini cards carry none of these: their image dial is `media_resolution`, the same table keyed by the same two kinds, mapping each to the tier it rides — flat-priced per image within a tier, with the choosing rationale beside the dial in the card file.
 
@@ -27,8 +28,8 @@ A `pricing` block — per-token prices in USD per million tokens (fresh input, c
 Every Gemini card declares the block, because its wire always bills — a Gemini conversation refuses at construction without one.
 The shipped openai-compatible card declares none: a call to the bundled server spends nothing real.
 
-The supported-fields set is the declared boundary: a card may only carry sampling fields the upstream engine verifiably honors end to end.
-Upstream's batched sampler implements temperature/top_p/top_k (min_p is accepted at the wire and dropped before the draw); penalties run as windowed logit processors — verified at mlx-vlm 0.7.10 (https://github.com/Blaizzy/mlx-vlm/blob/v0.7.10/mlx_vlm/server/generation.py: _make_sampler builds _PositionedTargetSampler from temperature/top_p/top_k/seed alone, and _make_logits_processors passes presence_context_size/repetition_context_size to make_logits_processors).
+The supported-fields set is the declared boundary: a card may only carry sampling fields the bundled server verifiably honors end to end.
+Upstream's batched sampler implements temperature/top_p/top_k (min_p is accepted at the wire and dropped before the draw) — verified at mlx-vlm 0.7.10 (https://github.com/Blaizzy/mlx-vlm/blob/v0.7.10/mlx_vlm/server/generation.py: _make_sampler builds _PositionedTargetSampler from temperature/top_p/top_k/seed alone); presence_penalty runs as a logit processor over the tokens the request has generated, the bundled server's own (mlx/presence_penalty.py).
 Extend SUPPORTED_SAMPLING only after verifying the engine honors the new field at the draw.
 """
 
@@ -44,7 +45,6 @@ SUPPORTED_SAMPLING = {
     "top_p",
     "top_k",
     "presence_penalty",
-    "presence_context_size",
 }
 
 SUPPORTED_FAMILIES = {"qwen3"}
@@ -229,12 +229,12 @@ def max_output_tokens(name: str) -> int:
     return _declared(name, "max_output_tokens")
 
 
-def max_image_tokens(name: str) -> dict:
-    """The per-image token ceilings a local card declares — {kind: tokens} for both of an analysis's kinds of screenshot, each realized by its backend as a downscale at the wire and priced at the sent geometry. Local-only: Gemini's image cost is flat per image, so its cards carry no image dial."""
-    return _validate_image_ceilings(name, _declared(name, "max_image_tokens"))
+def image_tokens(name: str) -> dict:
+    """The per-image token values a local card declares, {kind: tokens}, one per kind of screenshot; every screenshot of a kind is drawn and priced at its value (budget.image_geometry). Local-only: Gemini's image cost is flat per image, so its cards carry no image dial."""
+    return _validate_image_tokens(name, _declared(name, "image_tokens"))
 
 
-def _validate_image_ceilings(name: str, table) -> dict:
+def _validate_image_tokens(name: str, table) -> dict:
     ok = isinstance(table, dict) and set(table) == set(IMAGE_KINDS)
     if ok:
         ok = all(
@@ -243,9 +243,9 @@ def _validate_image_ceilings(name: str, table) -> dict:
         )
     if not ok:
         raise ValueError(
-            f"card {name!r} max_image_tokens in {_card_file(name)} is malformed — "
+            f"card {name!r} image_tokens in {_card_file(name)} is malformed — "
             f"it declares a table with exactly the keys {list(IMAGE_KINDS)}, each "
-            f"a positive per-image token ceiling; got {table!r}"
+            f"a positive per-image token count; got {table!r}"
         )
     return table
 
@@ -321,15 +321,13 @@ def load_card(name: str) -> dict:
             f"outside those families would be served without the bounds. Declare "
             f"family membership only for a model those patches reach."
         )
-    if "max_image_tokens" not in card:
+    if "image_tokens" not in card:
         raise ValueError(
-            f"card '{name}' declares no max_image_tokens — the per-image token "
-            f"ceilings the backend realizes at the wire, one per kind of "
-            f"screenshot ({list(IMAGE_KINDS)}), and pricing counts windows with. "
-            f"A local card without them has no stated image economics; declare "
-            f"the table in {_card_file(name)}."
+            f"card '{name}' declares no image_tokens, the per-image token value "
+            f"for each kind of screenshot ({list(IMAGE_KINDS)}) that screenshots "
+            f"are drawn and priced at; declare the table in {_card_file(name)}."
         )
-    _validate_image_ceilings(name, card["max_image_tokens"])
+    _validate_image_tokens(name, card["image_tokens"])
     url = card.get("base_url")
     if not isinstance(url, str) or not url:
         raise ValueError(
@@ -345,6 +343,13 @@ def load_card(name: str) -> dict:
             f"explicit host and port (scheme://host:port/...), so analysis "
             f"and the server agree on one endpoint without a second copy of "
             f"the number anywhere else"
+        )
+    template_options = card.get("chat_template_kwargs", {})
+    if not isinstance(template_options, dict):
+        raise ValueError(  # noqa: TRY004 — every malformed card is refused alike
+            f"card '{name}' chat_template_kwargs in {_card_file(name)} is "
+            f"{template_options!r} — it declares a table of options to the "
+            f"model's chat template, sent as the request's chat_template_kwargs"
         )
     unsupported = sorted(set(card["sampling"]) - SUPPORTED_SAMPLING)
     if unsupported:

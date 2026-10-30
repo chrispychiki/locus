@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from locus.evidence.db import connect
 from locus.evidence.hydrate import hydrate
-from locus.evidence.render import ScreenshotResult
+from locus.evidence.render import ScreenshotResult, screenshot_name
 from locus.evidence.rrweb_constants import (
     EventType,
     IncrementalSource,
@@ -310,14 +310,19 @@ def slice_bounds(conn, slice_id: int) -> tuple[int, int]:
 
 
 class FakeRenderSession:
-    """Stands in for RenderSession: writes a placeholder PNG per capture and
-    records the (label, timestamp) addresses, no browser."""
+    """Stands in for RenderSession without a browser: writes a placeholder PNG per
+    capture under its real name, and records each capture's (label, timestamp,
+    kind) and the size asked for at a fixed viewport."""
+
+    VIEWPORT = (1280, 720)
 
     def __init__(self, conn, slices, out_dir):
         self.slices = dict(slices)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.captured = []
+        self.kinds = []
+        self.sizes = []
         self.open = False
         self.releases = []
 
@@ -332,12 +337,14 @@ class FakeRenderSession:
         self.releases.append(len(self.captured))
         self.open = False
 
-    def capture(self, label, ts):
+    def capture(self, label, ts, *, kind, size):
         assert label in self.slices, f"capture addressed an unknown label {label!r}"
         self.open = True
-        path = self.out_dir / f"{label}_screenshot_{ts}.png"
+        path = self.out_dir / screenshot_name(label, kind, ts)
         path.write_bytes(b"\x89PNG fake")
         self.captured.append((label, ts))
+        self.kinds.append(kind)
+        self.sizes.append(tuple(size(*self.VIEWPORT)))
         return ScreenshotResult(timestamp=ts, path=str(path), faults={})
 
 

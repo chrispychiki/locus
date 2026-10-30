@@ -36,16 +36,18 @@ It is control flow over modules whose logic stays in their own homes:
 
 Runtime: compose the window with the pushed activity-screenshots; the model
 calls request_screenshots at the moments they need detail on — pushed or not —
-which the renderer produces fresh on demand and the engine feeds back at the
-card's detail tier; the next turn is the timestamp-cited answer.
+which the renderer produces fresh on demand and the engine feeds back inside the
+tool's reply, at the card's detail tier, with the question after them; the next
+turn is the timestamp-cited answer.
 Before anything ships, the answer is validated mechanically — every citation
 against the citation format, the window's labels, and its bounds (window.citation_violations),
 and an empty answer as the same kind of defect — and a defective answer goes
 back once with the defect named; what that one repair turn returns is the
 deliverable, residual citation defects and all — a completed analysis is never
-destroyed over them, and only a run whose repair also returns no answer at all
-errors. Whether a valid citation supports its sentence is judgment, and none
-lives here: the operator's dispute path owns that, offline.
+destroyed over them: an answer whose repair turn would not fit the context ships
+as written, and only a run that never returns an answer at all errors. Whether
+a valid citation supports its sentence is judgment, and none lives here: the
+operator's dispute path owns that, offline.
 Screenshots live and die inside this call; the return value is a manifest of
 paths and counts — no image bytes cross back to the caller. One invocation is
 one window, one conversation, one analysis directory: window.json (the machine
@@ -208,12 +210,12 @@ def _serve_round(
     by_label,
     multi,
     start_ms,
-    sent,
+    resume_task,
     on_screenshot=None,
 ) -> tuple[list, int]:
-    """The one round served for the posed task: render and feed back every requested screenshot the remaining context holds, and answer the tool calls with what happened. `requested` is _parse_requests' validated pairs — every moment already inside its slice's recording. Returns (the served screenshots as (label, ts, screenshot) triples, refused count).
+    """The one round served for the posed task: render every requested screenshot as a pull, at the conversation's pulled size, and answer the tool calls with every one the remaining context holds — the screenshots ride inside the reply to the call, each under its moment, followed by the task to resume, so the model reads them as the answer to its own call. `requested` is _parse_requests' validated pairs — every moment already inside its slice's recording. Returns (the served screenshots as (label, ts, screenshot) triples, refused count).
 
-    `sent` is the running set of (label, ts) moments whose screenshots the model has actually been shown — the pushed set plus every served pull — kept current here because the analysis directory is the record: a moment rendered for a pull but refused for context is deleted again unless the model saw it some other way, since a screenshot on disk that no one was shown would read as evidence to everything that trusts the record (the oracle's judge above all).
+    A pull rendered but refused for lack of context is deleted: the analysis directory is the record, and a screenshot on disk that the model was never shown would read as evidence to anything that reads the record, the oracle's judge included.
 
     `on_screenshot`, when given, is called with the running count as each screenshot lands, so a caller's pulse moves through the rendering."""
     # A pull is a purchase of detail: a moment already pushed at the
@@ -235,10 +237,19 @@ def _serve_round(
             wanted.append((label, ts))
             served.add((label, ts))
 
+    def pulled_size(width: int, height: int) -> tuple:
+        return conv.screenshot_size(width, height, pushed=False)
+
     rendered = []
     try:
         for label, ts in wanted:
-            rendered.append((label, ts, renderer.capture(label, ts)))
+            rendered.append(
+                (
+                    label,
+                    ts,
+                    renderer.capture(label, ts, kind="pulled", size=pulled_size),
+                )
+            )
             if on_screenshot is not None:
                 on_screenshot(len(rendered))
     finally:
@@ -248,7 +259,7 @@ def _serve_round(
         refused = len(rendered) - n
         if not n:
             return "No screenshots could be sent — no room left in the context. Answer from what you have."
-        text = f"Rendered {n} screenshot{'' if n == 1 else 's'}; see the next message."
+        text = f"Rendered {n} screenshot{'' if n == 1 else 's'}, each below under its moment."
         if duplicate:
             text += " A moment requested more than once was rendered once."
         if refused:
@@ -256,19 +267,28 @@ def _serve_round(
         return text
 
     def round_parts(n: int) -> list[tuple]:
-        """The round as it is appended when n of the rendered screenshots are served: the tool calls answered, then the screenshots, each under its moment."""
-        parts = [("tool", call.id, note(n)) for call in response.tool_calls]
-        if n:
-            parts.append(("text", "Requested screenshots:"))
+        """The round as it is appended when n of the rendered screenshots are served: every call answered, the last one's reply carrying the note, the screenshots under their moments, and the task to resume — calls made together are served together."""
+        *together, last = response.tool_calls
+        reply = [("text", note(n))]
         for label, ts, screenshot in rendered[:n]:
             stamp = format_offset(ts, start_ms, label if multi else None)
-            parts += [("text", f"screenshot at {stamp}:"), ("image", screenshot.path)]
-        return parts
+            reply += [
+                ("text", f"\nscreenshot at {stamp}:\n"),
+                ("image", screenshot.path),
+            ]
+        reply.append(("text", f"\n{resume_task}"))
+        pointer = (
+            "Served together with this turn's other request_screenshots calls — "
+            f"the reply to call {last.id} holds the screenshots."
+        )
+        return [("tool", call.id, pointer) for call in together] + [
+            ("tool", last.id, reply)
+        ]
 
     # The context is the only cap, and here it is exactly knowable: the backend
     # counts the next request with the whole round in place — the tool answers,
-    # the labels and the screenshots — so the round serves the most screenshots
-    # whose turn fits.
+    # the labels, the screenshots and the task — so the round serves the most
+    # screenshots whose turn fits.
     served_n = len(rendered)
     if conv.context_remaining(round_parts(served_n)) < 0:
         fits, over = 0, served_n
@@ -281,18 +301,10 @@ def _serve_round(
         served_n = fits
 
     screenshots = rendered[:served_n]
-    for label, ts, screenshot in rendered[served_n:]:
-        if (label, ts) not in sent:
-            Path(screenshot.path).unlink()
-    for label, ts, _ in screenshots:
-        sent.add((label, ts))
-    for part in round_parts(served_n):
-        if part[0] == "tool":
-            conv.add_tool_result(part[1], part[2])
-        elif part[0] == "text":
-            conv.add_user_text(part[1])
-        else:
-            conv.add_user_image(part[1])
+    for _, _, screenshot in rendered[served_n:]:
+        Path(screenshot.path).unlink()
+    for _, call_id, content in round_parts(served_n):
+        conv.add_tool_result(call_id, content)
     refused = len(rendered) - served_n
     return screenshots, refused
 
@@ -309,7 +321,6 @@ def _pose(
     labels,
     multi,
     start_ms,
-    sent,
     out_dir,
 ):
     """Pose the task and come back with what the model wrote: an invalid request — malformed, an unknown label, a moment outside its slice's recording — is failed in the tool's own channel with each defect named and retried fresh, and only a served round spends the task's one round; after it, further requests are refused, and a model that never writes is failed rather than looped forever. Returns (response, the served screenshots, refused).
@@ -374,7 +385,7 @@ def _pose(
                 by_label=by_label,
                 multi=multi,
                 start_ms=start_ms,
-                sent=sent,
+                resume_task=resume_task,
                 on_screenshot=served,
             )
             # The tool stays declared for the rest of the conversation: the
@@ -383,9 +394,9 @@ def _pose(
             # head of a conversation whose every request otherwise strictly
             # extends the last — the shape Gemini's implicit caching prices
             # and any server-side prefix cache reuses on. The answer is forced
-            # by the task; a call made anyway is failed in the tool's own
-            # channel.
-            response = send(resume_task)
+            # by the task the reply carried; a call made anyway is failed in
+            # the tool's own channel.
+            response = send()
             refusals = 0
             while response.tool_calls:
                 refusals += 1
@@ -454,6 +465,12 @@ def run_analysis(
     pushed = screenshot_moments(
         conn, window, screenshot_interval_ms=screenshot_interval_ms
     )
+    # The conversation records its transcript in the analysis dir, beside the
+    # output. It is made before rendering because it sets every screenshot's size.
+    conv = make_conversation(model, system, record_dir=out_dir)
+
+    def activity_size(width: int, height: int) -> tuple:
+        return conv.screenshot_size(width, height, pushed=True)
 
     with RenderSession(
         conn, {s.label: s.slice_id for s in table}, out_dir / "screenshots"
@@ -470,15 +487,13 @@ def run_analysis(
         ):
             try:
                 for label, ts in moments:
-                    pushed_screenshots[(label, ts)] = renderer.capture(label, ts)
+                    pushed_screenshots[(label, ts)] = renderer.capture(
+                        label, ts, kind="activity", size=activity_size
+                    )
             finally:
                 renderer.release()
         pushed_paths = {key: Path(s.path) for key, s in pushed_screenshots.items()}
-        sent = set(pushed_paths)
 
-        # The analysis dir is the conversation's record home — transcript and
-        # output are one bundle, placed by the same motion.
-        conv = make_conversation(model, system, record_dir=out_dir)
         composed = compose_window(
             conn,
             conv,
@@ -520,7 +535,6 @@ def run_analysis(
             labels=labels,
             multi=multi,
             start_ms=start_ms,
-            sent=sent,
             out_dir=out_dir,
         )
 
@@ -529,8 +543,8 @@ def run_analysis(
         # exactly the defect.
         # One repair turn, and what it returns is the deliverable: a completed
         # analysis is never destroyed over residual citation defects — they
-        # stand in the record as what they are. Only an answer that does not
-        # exist at all after the repair fails the run, below. Whether a valid
+        # stand in the record as what they are. Only a run left with no
+        # answer at all fails, below. Whether a valid
         # citation supports its sentence is judgment, and it lives offline
         # (the operator's dispute path).
         answer = split_meta(response.text)[0].strip()
@@ -541,7 +555,15 @@ def run_analysis(
             violations = citation_violations(answer, table, start_ms)
             task = repair_task(violations, labels) if violations else None
             repairing = f"{model} repairing {len(violations)} invalid citation(s)"
-        if task:
+        # A repair turn the context has no room for is not sent, and the
+        # answer ships as written.
+        refused_repair = bool(task) and conv.context_remaining([("text", task)]) < 0
+        if refused_repair and not answer:
+            raise RuntimeError(
+                f"engine produced an empty answer, and no room is left in the "
+                f"context to ask again — see the transcript in {out_dir}"
+            )
+        if task and not refused_repair:
             with beating(repairing, conv.progress_line):
                 conv.add_user_text(task)
                 response = conv.get_response(label="answer", tools=[screenshots_tool])
@@ -586,6 +608,9 @@ def run_analysis(
             if f.faults
         },
         "refused_screenshots": refused,
+        # A repair was owed but the context had no room for it, so the
+        # answer's citation defects stand unrepaired.
+        "refused_repair": refused_repair,
     }
     (out_dir / "window.json").write_text(json.dumps(manifest, indent=2))
 

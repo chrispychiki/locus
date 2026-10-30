@@ -75,6 +75,16 @@ def chat(
     return response
 
 
+def last_rendered_prompt() -> str:
+    """The rendering the server recorded for the last request it took — read from this clone, where the server under test was booted. The record is the latest request's, so a test reading it holds the server to itself: another client's request in between overwrites it."""
+    from contextlib import chdir
+
+    from locus.analysis.mlx.paths import rendered_prompt
+
+    with chdir(Path(__file__).resolve().parents[3]):
+        return rendered_prompt().read_text()
+
+
 def image_part(path):
     return {"type": "image_url", "image_url": {"url": str(path)}}
 
@@ -201,9 +211,7 @@ def test_interleaved_order_survives_many_images(tmp_path):
     # message put them — each "Image N:" immediately before its own vision block, the question
     # after the last. The semantic assert above cannot prove placement (ordinal matching answers
     # it even from a collapsed rendering); this reads the rendering itself.
-    rendered = (
-        Path(__file__).resolve().parents[3] / "data" / "mlx" / "rendered_prompt.txt"
-    ).read_text()
+    rendered = last_rendered_prompt()
     vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
     segments = rendered.split(vision_block)
     assert len(segments) == len(sequence) + 1, (
@@ -219,7 +227,7 @@ def test_interleaved_order_survives_many_images(tmp_path):
 
 
 def test_followup_turn_uses_prior_answer(tmp_path):
-    """KNOWN UPSTREAM GAP: assistant `reasoning` is parsed but not replayed into the chat template, so only content carries across turns. This asserts the conversational floor that must hold regardless: a follow-up referencing the prior answer works."""
+    """A follow-up referencing the prior answer works."""
     path = smiley_image(tmp_path, count=3, color="blue")
     first = chat(
         [
@@ -366,7 +374,7 @@ def test_generation_speed_floor():
 
 
 def test_the_in_process_count_is_the_servers_count(tmp_path):
-    """Pricing and the pre-send check count with the server's own code in the client's process (mlx/count.py). Over every shape an analysis sends — a system prompt, text interleaved with images of assorted sizes, the tool declaration, an assistant tool call answered by a tool result, a thinking replay — the count is the prompt_tokens the server reports."""
+    """Pricing and the pre-send check count with the server's own code in the client's process (mlx/count.py). Over every shape an analysis sends — a system prompt, text interleaved with images of assorted sizes, the tool declaration, an assistant tool call answered by a tool reply carrying a screenshot, an answer and a repair, every turn's thinking replayed under preserve_thinking — the count is the prompt_tokens the server reports."""
     from locus.analysis.mlx.count import prompt_tokens
     from locus.analysis.prompts import request_screenshots_tool
 
@@ -404,23 +412,94 @@ def test_the_in_process_count_is_the_servers_count(tmp_path):
                 "reasoning_content": "I should look closer.",
                 "tool_calls": [call],
             },
-            {"role": "tool", "tool_call_id": "call_1", "content": "rendered 1"},
             {
-                "role": "user",
+                "role": "tool",
+                "tool_call_id": "call_1",
                 "content": [
-                    {"type": "text", "text": "screenshot at 00:01.000:"},
+                    {
+                        "type": "text",
+                        "text": "Rendered 1 screenshot(s).\nscreenshot at 00:01.000:\n",
+                    },
                     image_part(paths[2]),
+                    {"type": "text", "text": "\nWhat happened?"},
                 ],
             },
+            {
+                "role": "assistant",
+                "content": '{"answer": "blue"}',
+                "reasoning_content": "The pulled screenshot is blue.",
+            },
+            {"role": "user", "content": "Repair the citation."},
         ],
         "tools": [{"type": "function", "function": request_screenshots_tool()}],
         "max_tokens": 16,
         "enable_thinking": True,
+        "chat_template_kwargs": {"preserve_thinking": True},
         "context_management": [],
     }
     served = requests.post(CHAT, json=body, timeout=TIMEOUT)
     served.raise_for_status()
     assert prompt_tokens(body) == served.json()["usage"]["prompt_tokens"]
+
+
+def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
+    """The handler's half of chat_turns.py, read off the rendering the server records: a tool reply's screenshot renders inside the reply, every assistant turn's reasoning renders under preserve_thinking, and a template option the template never reads is refused."""
+    path = tmp_path / "pull.png"
+    Image.new("RGB", (480, 925), COLORS["blue"]).save(path)
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "request_screenshots", "arguments": "{}"},
+    }
+    body = {
+        "model": loaded_model(),
+        "messages": [
+            {"role": "system", "content": "You read screenshots."},
+            {"role": "user", "content": "What color is the screen?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "REASONING-BEFORE-THE-PULL",
+                "tool_calls": [call],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "screenshot at 00:01.000:"},
+                    image_part(path),
+                    {"type": "text", "text": "What color is the screen?"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "blue",
+                "reasoning_content": "REASONING-OF-THE-ANSWER",
+            },
+            {"role": "user", "content": "In one word, again?"},
+        ],
+        "max_tokens": 16,
+        "enable_thinking": True,
+        "chat_template_kwargs": {"preserve_thinking": True},
+        "context_management": [],
+    }
+    requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
+    rendered = last_rendered_prompt()
+    reply = rendered.split("<tool_response>\n", 1)[1].split("\n</tool_response>", 1)[0]
+    assert reply == (
+        "screenshot at 00:01.000:<|vision_start|><|image_pad|><|vision_end|>"
+        "What color is the screen?"
+    )
+    assert "<think>\nREASONING-BEFORE-THE-PULL\n</think>" in rendered
+    assert "<think>\nREASONING-OF-THE-ANSWER\n</think>" in rendered
+
+    refused = requests.post(
+        CHAT,
+        json={**body, "chat_template_kwargs": {"preserve_thinkng": True}},
+        timeout=TIMEOUT,
+    )
+    assert refused.status_code == 400
+    assert "never reads" in refused.text
 
 
 def test_the_clients_pre_send_count_is_what_the_server_reports(tmp_path):

@@ -29,6 +29,7 @@ from pathlib import Path
 from locus.evidence.db import CANONICAL_ORDER
 from locus.evidence.hydrate import raw_event
 from locus.evidence.kinds import Kind
+from locus.evidence.render import read_screenshot_name
 from locus.evidence.text import describe_url, escape_value
 
 from .model.protocol import Conversation
@@ -754,12 +755,13 @@ def recording_facts(
 
 
 def screenshot_index(screenshot_dirs: list[str | Path]) -> dict[tuple[str, int], Path]:
-    """Rendered screenshots on disk → {(slice label, absolute ts): path}. A screenshot's file name is its identity — `{label}_screenshot_{ts}.png` — minted by the render service from the same slice table that stamps the stream, so the screenshots beside an answer read in the answer's own citation vocabulary."""
+    """Rendered screenshots on disk → {(slice label, absolute ts): path}. A screenshot's file name is its identity — render.screenshot_name's slice label, kind and moment — minted by the render service from the same slice table that stamps the stream, so the screenshots beside an answer read in the answer's own citation vocabulary. When a moment was rendered as both kinds, the pulled file is indexed, since the model saw it last."""
     screenshots: dict[tuple[str, int], Path] = {}
     for directory in screenshot_dirs:
         for png in Path(directory).glob("*_screenshot_*.png"):
-            label, _, ts = png.stem.rpartition("_screenshot_")
-            screenshots[(label, int(ts))] = png
+            label, kind, ts = read_screenshot_name(png.name)
+            if kind == "pulled" or (label, ts) not in screenshots:
+                screenshots[(label, ts)] = png
     return screenshots
 
 
@@ -776,7 +778,7 @@ def compose_window(
 
     `site_contexts` is the operator-stated business frame per site, keyed by snippet. A single entry is the window's one frame, emitted bare. A window spanning sites gets one attributed WEBSITE block per site and each visitor group's SUMMARY block names its site, so no site's slices ever read under another site's frame — a group whose snippet has no entry fails loud rather than composing misattributed evidence.
 
-    `screenshots` is the {(slice label, absolute ts): path} map of the window's screenshots — the engine renders the activity-screenshots straight into it; screenshots already on disk index in via screenshot_index. Every screenshot composed here is pushed — it samples the session beside the stream — and is added as such; how that rides the wire (resized to a local card's per-image token ceiling, or at a Gemini card's activity_screenshots tier) is the conversation's own card's business."""
+    `screenshots` is the {(slice label, absolute ts): path} map of the window's screenshots — the engine renders the activity-screenshots straight into it; screenshots already on disk index in via screenshot_index. Every screenshot composed here samples the session beside the stream, so it is added as pushed. The conversation decides how it is sent: the local backend sends the file as the renderer drew it, at the size the conversation set; Gemini sends it at the card's activity_screenshots tier."""
     table = list(window.slices)
     window_start, window_end = window.window_start, window.window_end
     multi = len(table) > 1

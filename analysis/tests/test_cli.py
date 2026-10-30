@@ -1178,9 +1178,8 @@ def test_ls_returns_every_slice_at_any_scale(tmp_path, capsys, monkeypatch):
     assert "v0003-visitor" in {s["visitor_id"] for s in rows}
 
 
-def test_screenshot_pricing_follows_the_card_ceiling(tmp_path, capsys, monkeypatch):
-    # What a screenshot costs on the wire is the model card's per-image token ceiling,
-    # realized by the backend — not a per-run flag, so no flag exists to state it.
+def test_screenshot_pricing_follows_the_card(tmp_path, capsys, monkeypatch):
+    # A screenshot's cost on the wire is the model card's per-image token value for its kind.
     monkeypatch.setattr("locus.analysis.cli.deployment_root", lambda: tmp_path)
     db = str(data_home(tmp_path) / "events.db")
 
@@ -1211,13 +1210,14 @@ def test_screenshot_pricing_follows_the_card_ceiling(tmp_path, capsys, monkeypat
     main(price)
     priced = read_output(capsys)
 
-    from locus.analysis.model.cards import max_image_tokens
+    from locus.analysis.model.cards import image_tokens
 
-    ceiling = max_image_tokens(priced["model"])["activity_screenshots"]
+    value = image_tokens(priced["model"])["activity_screenshots"]
     turn1 = priced["turn1"]
-    assert (
-        0 < turn1["screenshot_tokens"] <= ceiling * priced["n_activity_screenshots"]
-    ), "every screenshot is priced at or under the card's per-image token ceiling"
+    n = priced["n_activity_screenshots"]
+    assert 0.9 * value * n < turn1["screenshot_tokens"] <= value * n, (
+        "every activity-screenshot is priced at the card's value for its kind"
+    )
     assert turn1["context_pct"] > 0, (
         "the price is stated against the card's own context"
     )

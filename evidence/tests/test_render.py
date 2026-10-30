@@ -14,6 +14,11 @@ from locus.evidence.slices import (
 FIXTURE = Path(__file__).parent / "fixtures" / "demo_recording.json"
 
 
+def native(width, height):
+    """The viewport's own pixels: a screenshot drawn at device scale 1."""
+    return width, height
+
+
 @pytest.fixture
 def corpus(tmp_path):
     visitor_id, events = read_recording(FIXTURE)
@@ -40,14 +45,16 @@ def test_render_real_slice(corpus, tmp_path):
     with RenderSession(
         corpus, {"S1": slice_row["id"]}, tmp_path / "screenshots"
     ) as session:
-        screenshots = [session.capture("S1", ts) for ts in timestamps]
+        screenshots = [
+            session.capture("S1", ts, kind="activity", size=native) for ts in timestamps
+        ]
 
     assert len(screenshots) == len(timestamps)
     for screenshot in screenshots:
         png = Path(screenshot.path)
         assert png.exists() and png.stat().st_size > 1000
-        assert png.name == f"S1_screenshot_{screenshot.timestamp}.png", (
-            "a screenshot's file name is its (label, moment) identity"
+        assert png.name == f"S1_activity_screenshot_{screenshot.timestamp}.png", (
+            "a screenshot's file name is its (label, kind, moment) identity"
         )
         assert set(screenshot.faults) <= {
             "failedImages",
@@ -77,7 +84,12 @@ def test_faults_name_the_failed_resource_and_ignore_structural_stubs(corpus, tmp
     with RenderSession(
         corpus, {"S1": slice_row["id"]}, tmp_path / "screenshots"
     ) as session:
-        session.capture("S1", (slice_row["start_ts"] + slice_row["end_ts"]) // 2)
+        session.capture(
+            "S1",
+            (slice_row["start_ts"] + slice_row["end_ts"]) // 2,
+            kind="activity",
+            size=native,
+        )
         session.page.evaluate(
             """(dead) => {
                 const doc = document.querySelector('#replayer iframe').contentDocument;
@@ -107,8 +119,8 @@ def test_render_session_captures_by_label_across_a_window(corpus, tmp_path):
     with RenderSession(corpus, slices, tmp_path / "screenshots") as session:
         assert len(session.slices) == 2
         # capture out of label order, so the session must re-open S1 after S2
-        second = session.capture("S2", mids[1])
-        first = session.capture("S1", mids[0])
+        second = session.capture("S2", mids[1], kind="activity", size=native)
+        first = session.capture("S1", mids[0], kind="activity", size=native)
         # The live replay now holds exactly the addressed slice's events —
         # correctness never depends on capture order.
         injected = session.page.evaluate("() => window.__events.length")
@@ -128,7 +140,7 @@ def test_render_session_captures_by_label_across_a_window(corpus, tmp_path):
         RenderSession(corpus, slices, tmp_path / "screenshots2") as session,
         pytest.raises(ValueError, match="unknown label"),
     ):
-        session.capture("S9", mids[0])
+        session.capture("S9", mids[0], kind="activity", size=native)
 
 
 def test_the_browser_is_launched_by_a_capture_and_released_between_rounds(
@@ -144,11 +156,11 @@ def test_the_browser_is_launched_by_a_capture_and_released_between_rounds(
         corpus, {"S1": slice_row["id"]}, tmp_path / "screenshots"
     ) as session:
         assert session._browser is None and session.page is None
-        first = session.capture("S1", mid)
+        first = session.capture("S1", mid, kind="activity", size=native)
         assert session._browser is not None
         session.release()
         assert session._browser is None and session.page is None
-        second = session.capture("S1", mid + 1)
+        second = session.capture("S1", mid + 1, kind="activity", size=native)
         assert session._browser is not None
     assert session._browser is None
     for screenshot in (first, second):
@@ -262,7 +274,7 @@ def test_a_slice_that_opens_before_its_snapshot_renders_on_its_own_clock(tmp_pat
     )
 
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
-        screenshot = session.capture("S1", 7500)
+        screenshot = session.capture("S1", 7500, kind="activity", size=native)
         rendered = session.page.evaluate(
             "() => document.querySelector('#replayer iframe').contentDocument.body.textContent"
         )
@@ -289,7 +301,9 @@ def test_a_screenshot_with_no_replayer_is_refused_rather_than_captured_blank(
     with RenderSession(
         corpus, {"S1": slice_row["id"]}, tmp_path / "screenshots"
     ) as session:
-        session.capture("S1", ts)  # a real screenshot, from a real replayer
+        session.capture(
+            "S1", ts, kind="activity", size=native
+        )  # a real screenshot, from a real replayer
         session.page.evaluate(
             """() => {
                 document.querySelector('#replayer iframe').remove();
@@ -300,7 +314,7 @@ def test_a_screenshot_with_no_replayer_is_refused_rather_than_captured_blank(
         )
 
         with pytest.raises(Exception, match="rendered"):
-            session.capture("S1", ts)
+            session.capture("S1", ts, kind="activity", size=native)
 
 
 def test_an_empty_window_is_refused(corpus, tmp_path):
@@ -349,8 +363,8 @@ def test_labels_covering_the_same_instant_render_apart(corpus, tmp_path):
     slices = {"S1": slice_row["id"], "S2": slice_row["id"]}
 
     with RenderSession(corpus, slices, tmp_path / "screenshots") as session:
-        first = session.capture("S1", mid)
-        second = session.capture("S2", mid)
+        first = session.capture("S1", mid, kind="activity", size=native)
+        second = session.capture("S2", mid, kind="activity", size=native)
 
     assert first.path != second.path, (
         "one instant, two labels, two screenshot identities"
@@ -399,8 +413,8 @@ def test_a_text_selection_paints_into_the_screenshot(tmp_path):
     row = conn.execute("SELECT id FROM slices").fetchone()
 
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
-        before = session.capture("S1", 2000)
-        after = session.capture("S1", 3000)
+        before = session.capture("S1", 2000, kind="activity", size=native)
+        after = session.capture("S1", 3000, kind="activity", size=native)
 
     diff = ImageChops.difference(
         Image.open(before.path).convert("RGB"), Image.open(after.path).convert("RGB")
@@ -444,7 +458,7 @@ def test_content_revealed_by_an_animation_renders_revealed(tmp_path):
     row = conn.execute("SELECT id FROM slices").fetchone()
 
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
-        screenshot = session.capture("S1", 1001)
+        screenshot = session.capture("S1", 1001, kind="activity", size=native)
 
     img = Image.open(screenshot.path).convert("RGB")
     revealed = sum(
@@ -478,7 +492,7 @@ def test_a_capture_holds_the_moment_s_own_events_in_any_seek_order(tmp_path):
     seen = {}
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
         for ts in (2000, 3000, 1001, 2000, 1999):
-            session.capture("S1", ts)
+            session.capture("S1", ts, kind="activity", size=native)
             seen.setdefault(ts, []).append(session.page.evaluate(body))
 
     assert seen == {
@@ -501,17 +515,14 @@ def test_a_capture_ahead_of_the_covering_snapshot_is_refused(tmp_path):
 
     with (
         RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session,
-        pytest.raises(
-            ValueError,
-            match="t=3000.*t=6001",
-        ),
+        pytest.raises(ValueError, match="t=3000.*t=6001"),
     ):
-        session.capture("S1", 3000)
+        session.capture("S1", 3000, kind="activity", size=native)
     with (
         RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session,
         pytest.raises(ValueError, match="t=6002.*t=1000.*t=6001"),
     ):
-        session.capture("S1", 6002)
+        session.capture("S1", 6002, kind="activity", size=native)
     assert not list((tmp_path / "screenshots").glob("*.png"))
 
 
@@ -543,7 +554,7 @@ def test_seeked_scrolls_land_instantly_whatever_the_page_declares(tmp_path):
     row = conn.execute("SELECT id FROM slices").fetchone()
 
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
-        session.capture("S1", 2000)
+        session.capture("S1", 2000, kind="activity", size=native)
         declared = session.page.evaluate(
             "() => getComputedStyle(document.querySelector('#replayer iframe').contentDocument.documentElement).scrollBehavior"
         )
@@ -593,7 +604,7 @@ def test_a_capture_shows_the_moment_not_the_captures_before_it(tmp_path):
     seen = []
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
         for ts in (2001, 1500):
-            session.capture("S1", ts)
+            session.capture("S1", ts, kind="activity", size=native)
             seen.append(session.page.evaluate(state))
 
     assert seen == [["scrolled", 700], ["early", 0]]
@@ -641,9 +652,236 @@ def test_a_screenshot_is_the_size_of_its_moments_viewport(tmp_path):
     sizes = []
     with RenderSession(conn, {"S1": slice_id}, tmp_path / "screenshots") as session:
         for ts in (2500, 1500, 2000):
-            with Image.open(session.capture("S1", ts).path) as png:
+            with Image.open(
+                session.capture("S1", ts, kind="activity", size=native).path
+            ) as png:
                 sizes.append(png.size)
     assert sizes == [(390, 663), (1280, 800), (390, 663)]
+
+
+def test_a_screenshot_is_drawn_at_the_size_asked_for_its_moments_viewport(tmp_path):
+    """Each moment's screenshot is drawn at the size `size` gives its own viewport, larger or smaller and in different proportions, whatever order the moments are captured in."""
+    from PIL import Image
+
+    asked = {(1280, 800): (640, 400), (390, 663): (780, 1312)}
+    conn, slice_id = _resizing_slice(tmp_path)
+    sizes = []
+    with RenderSession(conn, {"S1": slice_id}, tmp_path / "screenshots") as session:
+        for ts in (2500, 1500, 2000):
+            shot = session.capture(
+                "S1", ts, kind="activity", size=lambda w, h: asked[(w, h)]
+            )
+            with Image.open(shot.path) as png:
+                sizes.append(png.size)
+    assert sizes == [(780, 1312), (640, 400), (780, 1312)]
+
+
+def test_the_screenshot_is_the_replayed_page_edge_to_edge(tmp_path):
+    """One-pixel black rules fixed to the replayed page's four edges land on the screenshot's four edges: the harness adds no border or offset and cuts nothing off."""
+    from PIL import Image
+
+    def rule(i, place):
+        return {
+            "type": NodeType.Element,
+            "tagName": "div",
+            "id": 4 + i,
+            "attributes": {"style": f"position: fixed; background: #000; {place}"},
+            "childNodes": [],
+        }
+
+    rules = [
+        rule(0, "left: 0; top: 0; width: 1px; height: 100%"),
+        rule(1, "right: 0; top: 0; width: 1px; height: 100%"),
+        rule(2, "left: 0; top: 0; height: 1px; width: 100%"),
+        rule(3, "left: 0; bottom: 0; height: 1px; width: 100%"),
+    ]
+    conn = connect(tmp_path / "events.db")
+    _synthetic(
+        conn,
+        [
+            _meta(1000, width=640, height=400),
+            _page_snapshot(1001, rules, css="body { background: #fff }"),
+        ],
+    )
+    materialize_slices(conn, "v1")
+    row = conn.execute("SELECT id FROM slices").fetchone()
+
+    with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
+        shot = session.capture("S1", 1001, kind="activity", size=native)
+
+    with Image.open(shot.path) as png:
+        gray = png.convert("L")
+        # Sampled away from the top-left corner, where the replayer draws its cursor.
+        middle_rows, middle_cols = range(100, 300, 20), range(100, 540, 20)
+        assert {gray.getpixel((0, y)) for y in middle_rows} == {0}
+        assert {gray.getpixel((639, y)) for y in middle_rows} == {0}
+        assert {gray.getpixel((x, 0)) for x in middle_cols} == {0}
+        assert {gray.getpixel((x, 399)) for x in middle_cols} == {0}
+        assert {gray.getpixel((1, y)) for y in middle_rows} == {255}
+        assert {gray.getpixel((x, 1)) for x in middle_cols} == {255}
+
+
+def test_detail_at_a_larger_size_is_rendered_at_that_density(tmp_path):
+    """A one-pixel black rule on white, at twice the viewport's pixels, is two device pixels of pure black with pure white beside them, which only a drawing at that scale produces."""
+    from PIL import Image
+
+    rule = {
+        "type": NodeType.Element,
+        "tagName": "div",
+        "id": 4,
+        "attributes": {
+            "style": "position: absolute; left: 100px; top: 0; width: 1px; height: 300px; background: #000"
+        },
+        "childNodes": [],
+    }
+    conn = connect(tmp_path / "events.db")
+    _synthetic(
+        conn,
+        [_meta(1000), _page_snapshot(1001, [rule], css="body { background: #fff }")],
+    )
+    materialize_slices(conn, "v1")
+    row = conn.execute("SELECT id FROM slices").fetchone()
+
+    with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
+        shot = session.capture(
+            "S1", 1001, kind="pulled", size=lambda w, h: (w * 2, h * 2)
+        )
+
+    with Image.open(shot.path) as png:
+        assert png.size == (2560, 1600)
+        gray = png.convert("L")
+        inked = {
+            x: gray.getpixel((x, 100))
+            for x in range(100, 300)
+            if gray.getpixel((x, 100)) < 255
+        }
+    (x, _), _ = inked.items()
+    assert inked == {x: 0, x + 1: 0}, (
+        "the rule is two pure-black device pixels wide, with nothing gray beside it"
+    )
+
+
+def test_a_capture_at_a_new_scale_is_drawn_at_that_scale(tmp_path):
+    """A capture at twice the viewport's pixels, after one at its own pixels, is drawn at twice them: the one-pixel rule is two pure-black device pixels with nothing gray beside it."""
+    from PIL import Image
+
+    rule = {
+        "type": NodeType.Element,
+        "tagName": "div",
+        "id": 4,
+        "attributes": {
+            "style": "position: absolute; left: 100px; top: 0; width: 1px; height: 300px; background: #000"
+        },
+        "childNodes": [],
+    }
+    conn = connect(tmp_path / "events.db")
+    _synthetic(
+        conn,
+        [_meta(1000), _page_snapshot(1001, [rule], css="body { background: #fff }")],
+    )
+    materialize_slices(conn, "v1")
+    row = conn.execute("SELECT id FROM slices").fetchone()
+
+    with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
+        session.capture("S1", 1001, kind="activity", size=native)
+        shot = session.capture(
+            "S1", 1001, kind="pulled", size=lambda w, h: (w * 2, h * 2)
+        )
+
+    with Image.open(shot.path) as png:
+        assert png.size == (2560, 1600)
+        gray = png.convert("L")
+        inked = {
+            x: gray.getpixel((x, 100))
+            for x in range(100, 300)
+            if gray.getpixel((x, 100)) < 255
+        }
+    (x, _), _ = inked.items()
+    assert inked == {x: 0, x + 1: 0}, (
+        "the rule is two pure-black device pixels wide, with nothing gray beside it"
+    )
+
+
+def test_a_size_off_the_viewports_proportions_is_squeezed_along_one_side(tmp_path):
+    """Asked for 2560x1568 of a 1280x800 viewport, the page is drawn at scale 2, exact across and 32 rows too tall, then resampled onto the size: a vertical one-pixel rule keeps its two pure-black device pixels, since nothing is resampled horizontally; a horizontal one is squeezed into grays; and the page's bottom edge is still the screenshot's last row."""
+    from PIL import Image
+
+    def rule(i, style):
+        return {
+            "type": NodeType.Element,
+            "tagName": "div",
+            "id": 4 + i,
+            "attributes": {"style": f"position: absolute; background: #000; {style}"},
+            "childNodes": [],
+        }
+
+    conn = connect(tmp_path / "events.db")
+    _synthetic(
+        conn,
+        [
+            _meta(1000),
+            _page_snapshot(
+                1001,
+                [
+                    rule(0, "left: 100px; top: 0; width: 1px; height: 300px"),
+                    rule(1, "left: 400px; top: 200px; width: 300px; height: 1px"),
+                    rule(2, "left: 800px; bottom: 0; width: 300px; height: 1px"),
+                ],
+                css="body { background: #fff; margin: 0; height: 100vh; position: relative }",
+            ),
+        ],
+    )
+    materialize_slices(conn, "v1")
+    row = conn.execute("SELECT id FROM slices").fetchone()
+
+    with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
+        shot = session.capture(
+            "S1", 1001, kind="pulled", size=lambda w, h: (2560, 1568)
+        )
+
+    with Image.open(shot.path) as png:
+        assert png.size == (2560, 1568)
+        gray = png.convert("L")
+        across = {
+            x: gray.getpixel((x, 100))
+            for x in range(100, 300)
+            if gray.getpixel((x, 100)) < 255
+        }
+        down = [gray.getpixel((1100, y)) for y in range(370, 410)]
+        bottom = gray.getpixel((1800, 1567))
+    (x, _), _ = across.items()
+    assert across == {x: 0, x + 1: 0}, "horizontally, the pixels are the browser's"
+    assert any(0 < v < 255 for v in down), "vertically, the pixels are resampled"
+    assert min(down) < 128, "the squeezed rule is still visible"
+    assert bottom < 128, "the page's bottom edge is the screenshot's last row"
+
+
+def test_one_moment_captured_as_both_kinds_is_two_files(corpus, tmp_path):
+    from PIL import Image
+
+    slice_row = corpus.execute(
+        "SELECT id, start_ts, end_ts FROM slices WHERE status='replayable' ORDER BY n_events DESC LIMIT 1"
+    ).fetchone()
+    mid = (slice_row["start_ts"] + slice_row["end_ts"]) // 2
+
+    with RenderSession(
+        corpus, {"S1": slice_row["id"]}, tmp_path / "screenshots"
+    ) as session:
+        activity = session.capture(
+            "S1", mid, kind="activity", size=lambda w, h: (w // 2, h // 2)
+        )
+        pulled = session.capture("S1", mid, kind="pulled", size=native)
+        with pytest.raises(ValueError, match="kind"):
+            session.capture("S1", mid, kind="pushed", size=native)
+
+    from locus.evidence.slices import slice_events, viewport_at
+
+    width, height = viewport_at(slice_events(corpus, slice_row["id"]), mid)
+    assert Path(activity.path).name == f"S1_activity_screenshot_{mid}.png"
+    assert Path(pulled.path).name == f"S1_pulled_screenshot_{mid}.png"
+    with Image.open(activity.path) as small, Image.open(pulled.path) as large:
+        assert small.size == (width // 2, height // 2)
+        assert large.size == (width, height)
 
 
 def test_a_frame_that_disagrees_with_the_moments_viewport_is_refused(
@@ -657,7 +895,7 @@ def test_a_frame_that_disagrees_with_the_moments_viewport_is_refused(
         RenderSession(conn, {"S1": slice_id}, tmp_path / "screenshots") as session,
         pytest.raises(RuntimeError, match="sized its frame 390x663"),
     ):
-        session.capture("S1", 2500)
+        session.capture("S1", 2500, kind="activity", size=native)
 
 
 def test_a_capture_lays_out_complete_before_its_scrolls_apply(
@@ -700,15 +938,17 @@ def test_a_capture_lays_out_complete_before_its_scrolls_apply(
         route.fulfill(path=str(tmp_path / "tall.png"), content_type="image/png")
 
     with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
-        session._ensure_browser()
+        session._ensure_page("S1", 1.0)
+        page = session.page
         session.page.route("**/tall.png", slowly)
-        session.capture("S1", 2000)
+        session.capture("S1", 2000, kind="activity", size=native)
         first = session.page.evaluate(scrolled)
         digest = "() => JSON.stringify(window.__events).length"
         before = session.page.evaluate(digest)
-        session.capture("S1", 1001)
-        session.capture("S1", 2000)
+        session.capture("S1", 1001, kind="activity", size=native)
+        session.capture("S1", 2000, kind="activity", size=native)
         after = session.page.evaluate(digest)
+        assert session.page is page, "the captures did not rebuild the page"
 
     assert first == 1500
     assert before == after, "the injected events are never written into"

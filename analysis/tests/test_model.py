@@ -77,7 +77,7 @@ def test_the_card_names_its_client(tmp_path, monkeypatch):
                 'model = "someone/model"\n'
                 'base_url = "http://127.0.0.1:9/v1"\n'
                 'family = "qwen3"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+                "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
                 "thinking_budget = 1\n"
                 "max_tokens = 1\n"
                 "context_tokens = 1000\n"
@@ -228,11 +228,14 @@ class RecordedConversation(Conversation):
     def image_tokens(self, image_path):
         return 1
 
+    def screenshot_size(self, width, height, *, pushed):
+        return width, height
+
     def context_remaining(self, appending=()):
         return 1_000
 
-    def _add_tool_result(self, call_id, content):
-        pass
+    def _add_tool_result(self, call_id, parts):
+        return []
 
     def _get_response(self, *, response_schema=None, tools=None):
         if not self.responses:
@@ -284,8 +287,10 @@ def test_persisted_calls_capture_the_full_payload_as_sent(tmp_path):
     assert meta["error"] is None
 
     second = (payloads / "2_revision_input.txt").read_text()
-    assert "=== assistant ===\n\nanswer one" in second
-    assert "thinking…" not in second
+    assert (
+        "=== assistant thoughts ===\n\nthinking…\n\n=== assistant ===\n\nanswer one"
+        in second
+    ), "the model carries its earlier reasoning, so the record shows it"
     assert second.rstrip().endswith("revise please")
     assert (payloads / "2_revision_response.txt").read_text() == "answer two\n"
 
@@ -421,52 +426,50 @@ def test_wire_boundary_counts_images_in_tokens(tmp_path):
         conversation.get_response()
 
 
-def test_the_card_ceiling_shrinks_an_oversized_screenshot_to_budget(tmp_path):
+def test_a_screenshot_is_sized_from_its_kinds_value_at_any_viewport(tmp_path):
     from _analysis_support import offline_image_tokens
-    from PIL import Image
-
-    image = tmp_path / "screenshot.png"
-    Image.new("RGB", (2560, 1323)).save(image)
 
     conversation = OpenAICompatConversation(
         "sys", card=_tiny_card(100_000), record_dir=tmp_path / "record"
     )
-    ceiling = conversation.max_image_tokens["activity_screenshots"]
+    for pushed, kind in ((True, "activity_screenshots"), (False, "pulled_screenshots")):
+        value = conversation.image_tokens_by_kind[kind]
+        for viewport in ((2560, 1323), (390, 844)):
+            cost = offline_image_tokens(
+                None, *conversation.screenshot_size(*viewport, pushed=pushed)
+            )
+            assert value * 0.9 < cost <= value, (
+                "each kind's screenshots cost within 10% of its value at any viewport"
+            )
+
+
+def test_an_image_is_sent_and_priced_as_the_file_is(tmp_path):
+    from _analysis_support import offline_image_tokens
+    from PIL import Image
+
+    conversation = OpenAICompatConversation(
+        "sys", card=_tiny_card(100_000), record_dir=tmp_path / "record"
+    )
+    # Off the grid, so neither of the card's values would draw a screenshot this size.
+    size = (1000, 700)
+    assert size not in {
+        conversation.screenshot_size(2560, 1323, pushed=pushed)
+        for pushed in (True, False)
+    }
+    image = tmp_path / "pull.png"
+    Image.new("RGB", size).save(image)
+    conversation.add_user_image(str(image))
     conversation.add_user_image(str(image), pushed=True)
 
-    sent = conversation.contents[0]["content"][0]["image_url"]["url"]
-    assert sent != str(image.resolve()), "the server is handed a smaller file"
-    with Image.open(sent) as shrunk:
-        cost = offline_image_tokens(None, *shrunk.size)
-    assert cost <= ceiling, "the card's ceiling is a hard per-image bound"
-    assert cost > ceiling * 0.9, "the resize lands near the ceiling, not far under"
-
-
-def test_a_pull_rides_under_its_own_ceiling_and_is_priced_so(tmp_path):
-    from _analysis_support import offline_image_tokens
-    from PIL import Image
-
-    image = tmp_path / "pull.png"
-    Image.new("RGB", (2560, 1323)).save(image)
-
-    conversation = OpenAICompatConversation(
-        "sys", card=_tiny_card(100_000), record_dir=tmp_path / "record"
+    assert conversation.sent_images() == [str(image.resolve())] * 2, (
+        "the file is sent as it is"
     )
-    activity = conversation.max_image_tokens["activity_screenshots"]
-    pulled = conversation.max_image_tokens["pulled_screenshots"]
-    cost = conversation.image_tokens(str(image))
-    conversation.add_user_image(str(image))
-
-    sent = conversation.contents[0]["content"][0]["image_url"]["url"]
-    assert sent != str(image.resolve()), "over the pull ceiling, a smaller file"
-    with Image.open(sent) as shrunk:
-        assert offline_image_tokens(None, *shrunk.size) == cost, "priced as sent"
-    assert activity < cost <= pulled, "a pull rides under its own, higher ceiling"
+    assert conversation.image_tokens(str(image)) == offline_image_tokens(None, *size)
 
 
-def test_a_local_card_with_a_bare_image_ceiling_is_refused(tmp_path, monkeypatch):
+def test_a_local_card_with_a_bare_image_tokens_value_is_refused(tmp_path, monkeypatch):
     from _analysis_support import card_roster
-    from locus.analysis.model.cards import max_image_tokens
+    from locus.analysis.model.cards import image_tokens
 
     card_roster(
         monkeypatch,
@@ -477,7 +480,7 @@ def test_a_local_card_with_a_bare_image_ceiling_is_refused(tmp_path, monkeypatch
                 'model = "mlx-community/x"\n'
                 'base_url = "http://127.0.0.1:9/v1"\n'
                 'family = "qwen3"\n'
-                "max_image_tokens = 600\n"
+                "image_tokens = 600\n"
                 "thinking_budget = 1\n"
                 "max_tokens = 1\n"
                 "context_tokens = 1000\n"
@@ -488,42 +491,25 @@ def test_a_local_card_with_a_bare_image_ceiling_is_refused(tmp_path, monkeypatch
         },
     )
     with pytest.raises(ValueError, match="activity_screenshots"):
-        max_image_tokens("qwen-bare")
+        image_tokens("qwen-bare")
 
 
-def test_a_screenshot_under_the_ceiling_passes_untouched(tmp_path):
-    from PIL import Image
-
-    image = tmp_path / "small.png"
-    Image.new("RGB", (320, 200)).save(image)
-
-    conversation = OpenAICompatConversation(
-        "sys", card=_tiny_card(100_000), record_dir=tmp_path / "record"
-    )
-    conversation.add_user_image(str(image), pushed=True)
-
-    sent = conversation.contents[0]["content"][0]["image_url"]["url"]
-    assert sent == str(image.resolve()), (
-        "under the ceiling nothing moves — a screenshot is never upscaled"
-    )
-
-
-def test_local_cards_declare_family_image_ceiling_and_endpoint():
+def test_local_cards_declare_family_image_tokens_and_endpoint():
     # The server's memory bounds patch one family's modules; a card states its
-    # membership and its per-image ceiling so neither is ever an unstated
+    # membership and each kind of screenshot's token count, so neither is an unstated
     # assumption. The endpoint is the card's too: analysis dials it and the
     # server binds it.
     from locus.analysis.model.cards import SUPPORTED_FAMILIES
 
     card = load_card("qwen3.6-35b-a3b-6bit")
     assert card["family"] in SUPPORTED_FAMILIES
-    assert set(card["max_image_tokens"]) == {
+    assert set(card["image_tokens"]) == {
         "activity_screenshots",
         "pulled_screenshots",
     }
     assert (
-        card["max_image_tokens"]["pulled_screenshots"]
-        > card["max_image_tokens"]["activity_screenshots"]
+        card["image_tokens"]["pulled_screenshots"]
+        > card["image_tokens"]["activity_screenshots"]
         > 0
     )
     assert card["base_url"].startswith("http")
@@ -546,7 +532,7 @@ def test_a_relative_model_directory_is_the_deployment_roots(tmp_path, monkeypatc
         'conversation = "openai-compatible"\n'
         'base_url = "http://127.0.0.1:9/v1"\n'
         'family = "qwen3"\n'
-        "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+        "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
         "thinking_budget = 1\nmax_tokens = 1\ncontext_tokens = 1000\nheadroom = 0.8\n"
         "[sampling]\ntemperature = 1.0\n"
     )
@@ -580,7 +566,7 @@ def test_a_card_outside_the_served_family_is_refused(tmp_path, monkeypatch):
                 'model = "someone/llama-x"\n'
                 'base_url = "http://127.0.0.1:9/v1"\n'
                 'family = "llama"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+                "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
                 "thinking_budget = 1\n"
                 "max_tokens = 1\n"
                 "context_tokens = 1000\n"
@@ -594,7 +580,7 @@ def test_a_card_outside_the_served_family_is_refused(tmp_path, monkeypatch):
         load_card("llama-x")
 
 
-def test_a_local_card_without_an_image_ceiling_is_refused(tmp_path, monkeypatch):
+def test_a_local_card_without_image_tokens_is_refused(tmp_path, monkeypatch):
 
     from _analysis_support import card_roster
 
@@ -616,7 +602,7 @@ def test_a_local_card_without_an_image_ceiling_is_refused(tmp_path, monkeypatch)
             )
         },
     )
-    with pytest.raises(ValueError, match="max_image_tokens"):
+    with pytest.raises(ValueError, match="declares no image_tokens"):
         load_card("qwen-bare")
 
 
@@ -632,7 +618,7 @@ def test_a_local_card_without_base_url_is_refused(tmp_path, monkeypatch):
                 'conversation = "openai-compatible"\n'
                 'model = "someone/qwen-bare"\n'
                 'family = "qwen3"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+                "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
                 "thinking_budget = 1\n"
                 "max_tokens = 1\n"
                 "context_tokens = 1000\n"
@@ -659,7 +645,7 @@ def test_a_local_card_base_url_without_port_is_refused(tmp_path, monkeypatch):
                 'model = "someone/qwen-bare"\n'
                 'base_url = "http://127.0.0.1/v1"\n'
                 'family = "qwen3"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
+                "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\n"
                 "thinking_budget = 1\n"
                 "max_tokens = 1\n"
                 "context_tokens = 1000\n"
@@ -682,7 +668,14 @@ def test_request_within_context_passes_the_wire_boundary(tmp_path):
         conversation.get_response()
 
 
-def test_card_claiming_unsupported_field_fails_loud(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "field",
+    [
+        "min_p = 0.05",  # accepted at the wire, dropped before the draw
+        "presence_context_size = 32768",  # the bundled server's penalty spans every generated token
+    ],
+)
+def test_card_claiming_unsupported_field_fails_loud(tmp_path, monkeypatch, field):
     from _analysis_support import card_roster
     from locus.analysis.model import cards
 
@@ -694,13 +687,14 @@ def test_card_claiming_unsupported_field_fails_loud(tmp_path, monkeypatch):
                 'conversation = "openai-compatible"\nmodel = "m"\n'
                 'base_url = "http://127.0.0.1:9/v1"\n'
                 'family = "qwen3"\n'
-                "max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\nthinking_budget = 1\n"
+                "image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }\nthinking_budget = 1\n"
                 "[sampling]\n"
-                "temperature = 1.0\nmin_p = 0.05\n"
+                f"temperature = 1.0\n{field}\n"
             )
         },
     )
-    with pytest.raises(ValueError, match=r"min_p.*SUPPORTED_SAMPLING"):
+    name = field.split(" = ")[0]
+    with pytest.raises(ValueError, match=rf"{name}.*SUPPORTED_SAMPLING"):
         cards.load_card("some-model")
 
 
@@ -1144,6 +1138,209 @@ def test_local_tool_result_must_answer_a_call_the_model_made(tmp_path):
 
     with pytest.raises(ValueError, match="never made"):
         conversation.add_tool_result("call_ghost", "for nobody")
+
+
+def _tool_call_chunks(reasoning=None):
+    delta = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "request_screenshots", "arguments": "{}"},
+            }
+        ],
+    }
+    chunks = []
+    if reasoning:
+        chunks.append(
+            {
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "reasoning": reasoning}}
+                ]
+            }
+        )
+    chunks.append(
+        {"choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls"}]}
+    )
+    return chunks
+
+
+def test_local_tool_call_turn_replays_its_reasoning(tmp_path):
+    """A tool-call turn replays its reasoning, as an answer turn does."""
+    conversation = _streaming_conversation(
+        record_dir=tmp_path / "r",
+        chunks=_tool_call_chunks(reasoning="look at the form at 2s"),
+    )
+    conversation.add_user_text("q")
+    conversation.get_response()
+
+    turn = conversation.contents[-1]
+    assert turn["tool_calls"][0]["id"] == "call_a"
+    assert turn["reasoning_content"] == "look at the form at 2s"
+    assert turn["reasoning"] == "look at the form at 2s"
+
+    stem = conversation._persist_input("answer")
+    record = (tmp_path / "r" / f"{stem}_input.txt").read_text()
+    assert (
+        "=== assistant thoughts ===\n\nlook at the form at 2s\n\n=== assistant ==="
+        in record
+    )
+
+
+def test_local_tool_reply_carries_its_screenshots_in_order(tmp_path):
+    """A pull's screenshots ride inside the one tool message answering the call, interleaved with their text in order; a reply that is text alone stays a string."""
+    from PIL import Image
+
+    image = tmp_path / "pull.png"
+    Image.new("RGB", (8, 8)).save(image)
+    conversation = _streaming_conversation(
+        record_dir=tmp_path / "r", chunks=_tool_call_chunks()
+    )
+    conversation.add_user_text("q")
+    conversation.get_response()
+
+    conversation.add_tool_result(
+        "call_a",
+        [
+            ("text", "Rendered 1 screenshot."),
+            ("text", "\nscreenshot at [00:02.000]:\n"),
+            ("image", str(image)),
+            ("text", "\nthe question"),
+        ],
+    )
+    message = conversation.contents[-1]
+    assert message["role"] == "tool" and message["tool_call_id"] == "call_a"
+    assert [part["type"] for part in message["content"]] == [
+        "text",
+        "text",
+        "image_url",
+        "text",
+    ]
+    assert message["content"][2]["image_url"]["url"] == str(image.resolve())
+    assert conversation.sent_images() == [str(image.resolve())]
+    assert conversation._record[-1] == (
+        "tool",
+        "call_a",
+        [
+            ("text", "Rendered 1 screenshot."),
+            ("text", "\nscreenshot at [00:02.000]:\n"),
+            ("image", str(image)),
+            ("text", "\nthe question"),
+        ],
+        [str(image.resolve())],
+    )
+
+    stem = conversation._persist_input("answer")
+    record = (tmp_path / "r" / f"{stem}_input.txt").read_text()
+    assert "[tool_result call_id=call_a]" in record
+    assert f'![pull.png](../pull.png "sent as {image.resolve()}")' in record, (
+        "the record names each screenshot the reply carried and the file sent"
+    )
+
+    from locus.analysis.model.protocol import tool_parts
+
+    with pytest.raises(ValueError, match="parts are"):
+        tool_parts([("video", str(image))])
+
+
+def test_local_request_carries_the_cards_template_options(tmp_path):
+    """The card's chat_template_kwargs ride every request verbatim, in the field the model makers' serving examples pass them in, and the persisted config states them; a card declaring none sends none."""
+    card = load_card("qwen3.6-35b-a3b-6bit")
+    conversation = OpenAICompatConversation("sys", card=card, record_dir=tmp_path / "a")
+    conversation.add_user_text("q")
+    assert conversation.wire_request()["extra_body"]["chat_template_kwargs"] == {
+        "preserve_thinking": True
+    }
+    assert conversation._config_manifest()["chat_template_kwargs"] == {
+        "preserve_thinking": True
+    }
+
+    bare = {k: v for k, v in card.items() if k != "chat_template_kwargs"}
+    plain = OpenAICompatConversation("sys", card=bare, record_dir=tmp_path / "b")
+    plain.add_user_text("q")
+    assert "chat_template_kwargs" not in plain.wire_request()["extra_body"]
+    assert "chat_template_kwargs" not in plain._config_manifest()
+
+
+def test_a_card_declares_template_options_as_a_table(monkeypatch, tmp_path):
+    from _analysis_support import card_roster
+    from locus.analysis.model import cards
+
+    shipped = cards._card_file("qwen3.6-35b-a3b-6bit").read_text()
+    directory = card_roster(
+        monkeypatch,
+        tmp_path / "roster",
+        {
+            "local": shipped.replace(
+                "chat_template_kwargs = { preserve_thinking = true }",
+                'chat_template_kwargs = "preserve_thinking"',
+            ).replace("default = true\n", "")
+        },
+        default="local",
+    )
+    assert directory.exists()
+    with pytest.raises(ValueError, match="chat_template_kwargs.*table"):
+        cards.load_card("local")
+
+
+def test_gemini_tool_reply_rides_its_function_result_then_the_user_turn(tmp_path):
+    """Gemini's function result carries the reply's opening text, and the rest — screenshots under their moments, the question after them — rides the user turn after it in order, each screenshot at the pulled tier."""
+    screenshot = tmp_path / "screenshot.png"
+    screenshot.write_bytes(b"\x89PNG")
+    wire = []
+    conversation = _interactions_conversation(
+        tmp_path,
+        [
+            _interaction(
+                tool_calls=[
+                    {
+                        "id": "fc1",
+                        "name": "request_screenshots",
+                        "arguments": {"timestamps": [1]},
+                    }
+                ],
+                usage={"total_tokens": 5},
+                interaction_id="v1_a",
+            ),
+            _interaction("done", usage={"total_tokens": 6}),
+        ],
+        wire_log=wire,
+        media_resolution={"pulled_screenshots": "high"},
+    )
+    tool = {
+        "name": "request_screenshots",
+        "description": "d",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    conversation.add_user_text("q")
+    conversation.get_response(label="answer", tools=[tool])
+    conversation.add_tool_result(
+        "fc1",
+        [
+            ("text", "Rendered 1 screenshot."),
+            ("text", "\nscreenshot at [00:01.000]:\n"),
+            ("image", str(screenshot)),
+            ("text", "\nthe task"),
+        ],
+    )
+    conversation.get_response(label="answer", tools=[tool])
+
+    result, user = wire[1]["input"]
+    assert result == {
+        "type": "function_result",
+        "call_id": "fc1",
+        "name": "request_screenshots",
+        "result": "Rendered 1 screenshot.",
+    }
+    assert user["type"] == "user_input"
+    kinds = [item["type"] for item in user["content"]]
+    assert kinds == ["text", "image", "text"]
+    assert user["content"][1]["resolution"] == "high"
+
+    with pytest.raises(ValueError, match="opens with text"):
+        conversation._add_tool_result("fc1", [("image", str(screenshot))])
 
 
 def test_a_tool_call_is_answered_exactly_once(tmp_path):
@@ -2119,9 +2316,15 @@ def test_gemini_requests_parse_as_the_sdk_request_model(tmp_path):
     }
     conversation.add_user_text("the task")
     conversation.get_response(label="answer", tools=[tool])
-    conversation.add_tool_result("fc1", "rendered")
-    conversation.add_user_image(str(screenshot))
-    conversation.add_user_text("the task")
+    conversation.add_tool_result(
+        "fc1",
+        [
+            ("text", "rendered"),
+            ("text", "\nscreenshot at [00:01.000]:\n"),
+            ("image", str(screenshot)),
+            ("text", "\nthe task"),
+        ],
+    )
     conversation.get_response(label="answer", tools=[tool])
 
     for request in wire:

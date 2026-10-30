@@ -157,8 +157,8 @@ def test_assemble_evidence_windows_real_slice(distilled_db, tmp_path):
     screenshot_dir.mkdir()
     in_window_ts = epoch + mid_offset_s * 1000 + 500
     far_ts = epoch
-    (screenshot_dir / f"S1_screenshot_{in_window_ts}.png").write_bytes(b"png")
-    (screenshot_dir / f"S1_screenshot_{far_ts}.png").write_bytes(b"png")
+    (screenshot_dir / f"S1_activity_screenshot_{in_window_ts}.png").write_bytes(b"png")
+    (screenshot_dir / f"S1_activity_screenshot_{far_ts}.png").write_bytes(b"png")
 
     evidence = assemble_evidence(
         conn,
@@ -235,8 +235,8 @@ def test_evidence_is_scoped_to_the_cited_label(tmp_path):
 
     screenshot_dir = tmp_path / "screenshots"
     screenshot_dir.mkdir()
-    (screenshot_dir / "S1_screenshot_5000.png").write_bytes(b"png")
-    (screenshot_dir / "S2_screenshot_5000.png").write_bytes(b"png")
+    (screenshot_dir / "S1_activity_screenshot_5000.png").write_bytes(b"png")
+    (screenshot_dir / "S2_activity_screenshot_5000.png").write_bytes(b"png")
 
     claims = [_claim(1, start=4, label="S2")]
     evidence = assemble_evidence(conn, table, epoch, [screenshot_dir], claims)

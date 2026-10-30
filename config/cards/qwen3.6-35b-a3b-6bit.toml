@@ -6,17 +6,21 @@ conversation = "openai-compatible"
 model = "mlx-community/Qwen3.6-35B-A3B-6bit"
 base_url = "http://127.0.0.1:8847/v1"
 family = "qwen3"
-# Per-image token ceilings, one per kind of screenshot: 600 is the analog of a Gemini card's medium
-# tier for the activity-screenshots, 1200 the analog of its high tier for pulls.
-max_image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }
+# Tokens per screenshot, by kind, at any viewport: each screenshot is drawn at the largest size
+# whose cost fits its kind's value. Activity-screenshots are cheap on purpose: the model pulls any
+# moment it needs to see in more detail at the pulled_screenshots value.
+image_tokens = { activity_screenshots = 600, pulled_screenshots = 1200 }
 thinking_budget = 16384
 max_tokens = 24576
 context_tokens = 262144
 headroom = 0.8
+# Qwen3.6 is trained to build on its reasoning from earlier turns, and its model card recommends
+# keeping it for agent use: under preserve_thinking the template renders every assistant turn's
+# reasoning, where by default it drops all of it before the latest user message.
+chat_template_kwargs = { preserve_thinking = true }
 
 [sampling]
 temperature = 1.0
 top_p = 0.95
 top_k = 20
 presence_penalty = 1.5
-presence_context_size = 32768

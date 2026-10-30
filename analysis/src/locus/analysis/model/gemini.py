@@ -370,6 +370,10 @@ class GeminiConversation(Conversation):
     def image_tokens(self, image_path: str) -> int:
         return image_tier_tokens(self.media_resolution.get("pulled_screenshots"))
 
+    def screenshot_size(self, width: int, height: int, *, pushed: bool) -> tuple:
+        """The viewport's own pixels, for both kinds. Gemini resizes every image to its tier, and the pixel size of a tier is not published (https://ai.google.dev/gemini-api/docs/media-resolution), so there is no other size to draw at."""
+        return width, height
+
     def context_remaining(self, appending=()) -> int:
         """Generation claims nothing from the input context on this path, so the whole remainder is the conversation's to spend beyond what it carries: the model's context minus the last response's usage total — the wire's own count of everything the conversation held through that reply, persisted in its meta.json — minus the priced delta of parts appended since it and of `appending` (tool-result text at countTokens' free arithmetic, served screenshots at the pulled_screenshots tier's flat price)."""
         from .cards import context_tokens
@@ -403,15 +407,28 @@ class GeminiConversation(Conversation):
     def _delta_text_tokens(self, texts: list[str]) -> int:
         return count_text_tokens(self.model_id, texts)
 
-    def _add_tool_result(self, call_id: str, content: str) -> None:
+    def _add_tool_result(self, call_id: str, parts: list[tuple]) -> list[str]:
+        """The function result carries the reply's opening text; the parts after it follow in a user turn, in order, each image at the pulled_screenshots tier."""
+        kind, opening = parts[0]
+        if kind != "text":
+            raise ValueError(
+                "a tool reply opens with text on this backend — its function result carries text"
+            )
         self._pending.append(
             {
                 "type": "function_result",
                 "call_id": call_id,
                 "name": self._call_names[call_id],
-                "result": content,
+                "result": opening,
             }
         )
+        sent_as = []
+        for kind, value in parts[1:]:
+            if kind == "text":
+                self._add_user_text(value)
+            else:
+                sent_as.append(self._add_user_image(value, pushed=False))
+        return sent_as
 
     @staticmethod
     def _content_hash(filepath: str) -> str:

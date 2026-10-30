@@ -2,11 +2,11 @@
 
 A capability a backend cannot realize is degraded openly, with the limit documented where it happens, so a caller always knows what its argument actually did. Backend-specific knobs (thinking levels, media resolution, reasoning effort) belong to the concrete backend's constructor, visible only to callers holding the concrete class.
 
-How an image rides the wire is the backend's own card's business, never the caller's: the local backend realizes its card's per-image token ceilings by handing the server a physically smaller file, and Gemini sends each image at a card-declared resolution tier for that tier's flat price. The one thing a caller states is what the image is — add_user_image's pushed flag marks an activity-screenshot, whose job is sampling the session — and each backend realizes it as its card allows: Gemini rides activity-screenshots at the card's activity_screenshots tier, the local backend carries each under its card's ceiling for that kind. Either way the record names what was actually sent.
+The backend, by its card, decides how an image is sent; the caller states only what the image is: add_user_image's pushed flag marks an activity-screenshot. The backend sets each screenshot's pixel size (screenshot_size) and the renderer draws it at that size. The local backend sets the size its card's per-image token value gives the viewport and sends the file as drawn. Gemini resizes every image to the card's flat-priced tier for its kind, so it sets the viewport's own pixels. The record names what was sent.
 
 A caller that wants to know what an image will cost, or how much context is left to spend, asks the backend — image_tokens and context_remaining are the wire's own arithmetic, so an agentic caller serves what fits and refuses the rest against a number that is true at the moment it acts.
 
-The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes three files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt and every part verbatim in order, roles delimited, images as inline pointer lines carrying the image's path and the remote reference actually sent), N_response.txt (the reply, with thoughts inline and delimited when present), N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten. response_text() inverts the response file's format, so a reader of the record recovers exactly the reply text.
+The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes three files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt and every part verbatim in order, roles delimited, each earlier assistant turn's thoughts under its own heading as the backend exposed them, images as inline pointer lines carrying the image's path and the remote reference actually sent), N_response.txt (the reply, with thoughts inline and delimited when present), N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten. response_text() inverts the response file's format, so a reader of the record recovers exactly the reply text.
 
 Image pointers are written relative to the payload file that carries them, so they resolve from where they sit and the record directory holding them stays portable.
 
@@ -143,6 +143,23 @@ def latest_answer_response(record_dir: Path) -> Path:
     return responses[-1]
 
 
+def tool_parts(content: str | list[tuple]) -> list[tuple]:
+    """A tool reply as its parts in order: a string is one text part; a list is checked part by part — ("text", text) or ("image", path)."""
+    if isinstance(content, str):
+        return [("text", content)]
+    parts = list(content)
+    for part in parts:
+        if not (
+            isinstance(part, tuple) and len(part) == 2 and part[0] in ("text", "image")
+        ):
+            raise ValueError(
+                f"a tool reply's parts are ('text', text) or ('image', path); got {part!r}"
+            )
+    if not parts:
+        raise ValueError("a tool reply needs at least one part")
+    return parts
+
+
 class Conversation(ABC):
     """A running exchange with one vision-capable model.
 
@@ -180,26 +197,24 @@ class Conversation(ABC):
         sent_as = self._add_user_image(image_path, pushed)
         self._record.append(("image", str(image_path), sent_as))
 
-    def add_tool_result(self, call_id: str, content: str) -> None:
+    def add_tool_result(self, call_id: str, content: str | list[tuple]) -> None:
         """Answer a model tool call — exactly once, and only a call this
         conversation's model actually made: a result addressed anywhere else is
         answered into the void while the call the model did make goes unanswered,
-        so it is refused here, where the mistake is still legible. On every
-        backend the rendered screenshot that a request produces is fed back as a
-        separate user turn (add_user_image), not inside the tool result — Gemini
-        can carry images in a functionResponse but mlx collects pixels only from
-        user-role messages, so the user-turn shape is the one both honor. This
-        carries the textual acknowledgement the tool-calling protocol requires
-        before the next user turn."""
+        so it is refused here, where the mistake is still legible. content is
+        the tool's reply: a string, or its parts in order — ("text", text) and
+        ("image", path) (tool_parts), each image sent as the backend sends a
+        pulled screenshot."""
         if call_id not in self._open_calls:
             raise ValueError(
                 f"tool result for call {call_id!r}, which this conversation "
                 f"never made or already answered; open calls: "
                 f"{sorted(self._open_calls) or 'none'}"
             )
+        parts = tool_parts(content)
         self._open_calls.discard(call_id)
-        self._add_tool_result(call_id, content)
-        self._record.append(("tool", call_id, content))
+        sent_as = self._add_tool_result(call_id, parts)
+        self._record.append(("tool", call_id, parts, sent_as))
 
     def get_response(
         self,
@@ -347,11 +362,16 @@ class Conversation(ABC):
         """What this image costs on this backend's wire as a pull — the only kind appended after turn 1, which is the only time anything asks."""
 
     @abstractmethod
+    def screenshot_size(self, width: int, height: int, *, pushed: bool) -> tuple:
+        """The (width, height) in pixels this backend's screenshot of a viewport this size is drawn at; pushed marks an activity-screenshot, as in add_user_image. The renderer draws at exactly this size, so the file is what is sent."""
+
+    @abstractmethod
     def context_remaining(self, appending: Sequence[tuple] = ()) -> int:
         """Tokens the model's context would still hold beyond this conversation
         and what its next generation will claim, were `appending` added to it —
         parts in the record's own shape, in order: ("text", text), ("image",
-        path) for a pull, ("tool", call_id, content). Nothing is appended. By
+        path) at the pulled tier, ("tool", call_id, content) with content as
+        add_tool_result takes it. Nothing is appended. By
         this backend's own wire arithmetic: a backend that cannot run its wire's
         count here anchors on the last response's usage total
         (_wire_anchored_used). Turn-1 fit is the composition plane's question
@@ -396,7 +416,8 @@ class Conversation(ABC):
             if entry[0] == "text":
                 texts.append(entry[1])
             elif entry[0] == "tool":
-                texts.append(entry[2])
+                for kind, value in tool_parts(entry[2]):
+                    (texts if kind == "text" else images).append(value)
             elif entry[0] == "image":
                 images.append(entry[1])
         return (
@@ -406,8 +427,8 @@ class Conversation(ABC):
         )
 
     @abstractmethod
-    def _add_tool_result(self, call_id: str, content: str) -> None:
-        """Append a tool-result turn answering the call with id call_id."""
+    def _add_tool_result(self, call_id: str, parts: list[tuple]) -> list[str]:
+        """Append the tool's reply to the call with id call_id, its parts in order as this backend's wire carries a tool reply, and return what each image part was sent as, in order."""
 
     @abstractmethod
     def _get_response(
@@ -452,14 +473,28 @@ class Conversation(ABC):
                 shown = os.path.relpath(entry[1], self._persist_dir)
                 emit("user", f'![{Path(entry[1]).name}]({shown} "sent as {entry[2]}")')
             elif entry[0] == "tool":
-                emit("tool", f"[tool_result call_id={entry[1]}]\n{entry[2]}")
+                lines = [f"[tool_result call_id={entry[1]}]"]
+                sent_as = iter(entry[3])
+                for kind, value in entry[2]:
+                    if kind == "text":
+                        lines.append(value)
+                    else:
+                        shown = os.path.relpath(value, self._persist_dir)
+                        lines.append(
+                            f'![{Path(value).name}]({shown} "sent as {next(sent_as)}")'
+                        )
+                emit("tool", "\n".join(lines))
             elif entry[0] == "assistant_tool_calls":
+                if entry[3]:
+                    emit("assistant thoughts", entry[3])
                 calls = "\n".join(
                     f"[tool_call id={c.id} {c.name}({json.dumps(c.arguments)})]"
                     for c in entry[1]
                 )
                 emit("assistant", (f"{entry[2]}\n{calls}" if entry[2] else calls))
             else:
+                if entry[2]:
+                    emit("assistant thoughts", entry[2])
                 emit("assistant", entry[1])
         self._persist_write(stem, "input.txt", "\n\n".join(sections))
         return stem

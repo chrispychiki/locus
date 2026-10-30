@@ -75,6 +75,13 @@ def _word_cost_model():
     )
 
 
+def _reply_texts(content) -> list[str]:
+    """A tool reply's text parts, in order — a reply that is text alone is its own one part."""
+    if isinstance(content, str):
+        return [content]
+    return [value for kind, value in content if kind == "text"]
+
+
 def _wire(monkeypatch, conv, context_tokens=10_000_000):
     """Every analysis prices itself before running, so the cost model rides along
     with the conversation double: word-counted text, one token per screenshot."""
@@ -330,14 +337,27 @@ def test_engine_pulls_arbitrary_screenshots_then_answers(
         "the declaration never leaves the request — withdrawing it would "
         "rewrite the head of a conversation that otherwise only extends"
     )
-    resume = conv.texts[-1]
-    assert QUESTION in resume, (
+    assert [cid for cid, _ in conv.tool_results] == ["c1"], "the tool call is answered"
+    (_, reply) = conv.tool_results[0]
+    kinds = [kind for kind, _ in reply]
+    assert kinds[0] == "text" and kinds.count("image") == 2, (
+        "the screenshots ride inside the tool's reply to the call that asked for them"
+    )
+    assert conv.parts[-1][0] == "tool", (
+        "no user turn follows the reply — the model reads its screenshots as the "
+        "answer to its own call"
+    )
+    resume = _reply_texts(reply)[-1]
+    assert kinds[-1] == "text" and QUESTION in resume, (
         "the question rides last again, now after the screenshots it asked for"
     )
     assert "request_screenshots" not in resume, (
         "without the go-and-look step: the task is what forces the answer"
     )
-    assert [cid for cid, _ in conv.tool_results] == ["c1"], "the tool call is answered"
+    anchors = [t.strip() for t in _reply_texts(reply)[1:-1]]
+    assert all(a.startswith("screenshot at [") for a in anchors), (
+        "each screenshot sits under its moment"
+    )
     assert manifest["n_pulled_screenshots"] == 2
     assert manifest["render_faults"] == {}, "clean screenshots leave no fault entries"
     assert manifest["pulled"] == [
@@ -348,9 +368,87 @@ def test_engine_pulls_arbitrary_screenshots_then_answers(
     )
     for off in offsets:
         ts = max(lo, min(lo + off, hi))
-        assert (out / "screenshots" / f"S1_screenshot_{ts}.png").exists(), (
-            "the requested arbitrary timestamp was rendered fresh"
+        assert (out / "screenshots" / f"S1_pulled_screenshot_{ts}.png").exists(), (
+            "the requested arbitrary timestamp was rendered fresh, as a pull"
         )
+
+
+def test_calls_made_together_are_served_in_the_last_ones_reply(
+    monkeypatch, distilled_db, tmp_path
+):
+    """Two request_screenshots calls in one turn are one round: every call is answered, the last one's reply carries every screenshot and the task, and the others point at it."""
+    conn = connect(distilled_db)
+    slice_id = best_slice(conn)
+    lo, hi = slice_bounds(conn, slice_id)
+    duration = max(hi - lo, 3)
+    conv = ScriptedConversation(
+        [
+            Response(
+                text="",
+                tool_calls=[
+                    ToolCall("c1", "request_screenshots", _pull(duration // 3)),
+                    ToolCall("c2", "request_screenshots", _pull(2 * duration // 3)),
+                ],
+            ),
+            Response(text=ANSWER),
+        ],
+        system_prompt=SYSTEM,
+    )
+    _wire(monkeypatch, conv)
+
+    manifest = _analysis(conn, [slice_id], tmp_path / "run")
+
+    assert manifest["n_pulled_screenshots"] == 2
+    (first, pointer), (last, reply) = conv.tool_results
+    assert (first, last) == ("c1", "c2"), "every call is answered"
+    assert isinstance(pointer, str) and f"the reply to call {last} holds" in pointer
+    assert [kind for kind, _ in reply].count("image") == 2, (
+        "the last call's reply carries the whole round's screenshots"
+    )
+    assert QUESTION in _reply_texts(reply)[-1], "and the task after them"
+
+
+def test_every_screenshot_is_rendered_at_the_conversations_size_for_its_kind(
+    monkeypatch, distilled_db, tmp_path
+):
+    """The renderer draws each screenshot at the size the conversation sets for its kind: the pushed set at the activity size, a pull at the pulled size."""
+    conn = connect(distilled_db)
+    slice_id = best_slice(conn)
+    lo, hi = slice_bounds(conn, slice_id)
+
+    class Sizing(ScriptedConversation):
+        def screenshot_size(self, width, height, *, pushed):
+            return (width // 2, height // 2) if pushed else (width * 2, height * 2)
+
+    conv = Sizing(
+        [
+            Response(
+                text="",
+                tool_calls=[
+                    ToolCall("c1", "request_screenshots", _pull((hi - lo) // 2))
+                ],
+            ),
+            Response(text=ANSWER),
+        ],
+        system_prompt=SYSTEM,
+    )
+    _wire(monkeypatch, conv)
+    sessions = []
+
+    def remembering(*args, **kwargs):
+        session = FakeRenderSession(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(engine, "RenderSession", remembering)
+
+    _analysis(conn, [slice_id], tmp_path / "run")
+
+    (session,) = sessions
+    width, height = FakeRenderSession.VIEWPORT
+    *pushed, pulled = zip(session.kinds, session.sizes)
+    assert pushed and set(pushed) == {("activity", (width // 2, height // 2))}
+    assert pulled == ("pulled", (width * 2, height * 2))
 
 
 def test_the_renderer_is_released_after_every_round_of_captures(
@@ -453,18 +551,18 @@ def test_engine_refuses_the_pulls_the_context_cannot_hold(
     for off in offsets[:2]:
         ts = max(lo, min(lo + off, hi))
         assert (
-            tmp_path / "run" / "screenshots" / f"S1_screenshot_{ts}.png"
+            tmp_path / "run" / "screenshots" / f"S1_pulled_screenshot_{ts}.png"
         ).exists(), "the earliest moments are the ones served"
     pushed = engine.screenshot_moments(conn, resolve_window(conn, [slice_id]))[slice_id]
-    shown = {f"S1_screenshot_{ts}.png" for ts in pushed} | {
-        f"S1_screenshot_{max(lo, min(lo + off, hi))}.png" for off in offsets[:2]
+    shown = {f"S1_activity_screenshot_{ts}.png" for ts in pushed} | {
+        f"S1_pulled_screenshot_{max(lo, min(lo + off, hi))}.png" for off in offsets[:2]
     }
     on_disk = {p.name for p in (tmp_path / "run" / "screenshots").iterdir()}
     assert on_disk == shown, (
         "the record holds exactly the screenshots the model was shown — a "
         "moment rendered for a refused pull must not survive as evidence"
     )
-    note = conv.tool_results[0][1]
+    note = _reply_texts(conv.tool_results[0][1])[0]
     assert re.search(r"\b3\b", note), (
         "the refusal is reported back to the model with its count, not silently swallowed"
     )
@@ -716,7 +814,7 @@ def test_engine_piece_window_anchors_screenshot_moments_at_its_bounds(
 
     screenshot_ts = sorted(
         int(p.stem.rpartition("_screenshot_")[2])
-        for p in (out / "screenshots").glob("*_screenshot_*.png")
+        for p in (out / "screenshots").glob("*_activity_screenshot_*.png")
     )
     assert window_lo in screenshot_ts and window_hi in screenshot_ts, (
         "the piece's own in-bounds endpoints anchor the pushed set"
@@ -763,7 +861,7 @@ def test_a_pushed_moment_re_requested_is_served_as_a_detail_purchase(
     assert manifest["n_pulled_screenshots"] == 1, (
         "offset 0 is the window's first pushed screenshot — re-served at full detail"
     )
-    assert "once" in conv.tool_results[0][1], (
+    assert "once" in _reply_texts(conv.tool_results[0][1])[0], (
         "the model is told the duplicate was folded"
     )
 
@@ -872,10 +970,14 @@ def test_engine_serves_label_addressed_pulls(monkeypatch, distilled_db, tmp_path
     )
     assert manifest["n_pulled_screenshots"] == 1
     ts = max(lo2, min(lo1 + off2, hi2))
-    assert (out / "screenshots" / f"S2_screenshot_{ts}.png").exists(), (
+    assert (out / "screenshots" / f"S2_pulled_screenshot_{ts}.png").exists(), (
         "the corrected retry rendered from the named slice"
     )
-    anchors = [t for t in conv.texts if t.startswith("screenshot at ")]
+    anchors = [
+        t.strip()
+        for t in _reply_texts(conv.tool_results[-1][1])
+        if t.strip().startswith("screenshot at ")
+    ]
     assert anchors and anchors[0].startswith("screenshot at [S2 "), (
         "the served screenshot is anchored with its slice label"
     )
@@ -916,10 +1018,9 @@ def test_a_pull_outside_its_slices_recording_is_failed_in_channel(
         "the defect names the slice and its real span"
     )
     assert manifest["n_pulled_screenshots"] == 0
-    assert not list((out / "screenshots").glob("S2_screenshot_*.png")) or all(
-        int(p.stem.rpartition("_screenshot_")[2]) >= lo2
-        for p in (out / "screenshots").glob("S2_screenshot_*.png")
-    ), "nothing was rendered for the failed request beyond the pushed set"
+    assert not list((out / "screenshots").glob("*_pulled_screenshot_*.png")), (
+        "nothing was rendered for the failed request"
+    )
 
 
 def test_a_pull_into_a_slices_lead_clamps_to_its_covering_snapshot(
@@ -1004,10 +1105,11 @@ def test_a_clean_answer_ships_with_no_repair_turn(monkeypatch, distilled_db, tmp
     conv = ScriptedConversation([Response(text=ANSWER)], system_prompt=SYSTEM)
     _wire(monkeypatch, conv)
 
-    _analysis(conn, [slice_id], tmp_path / "run")
+    manifest = _analysis(conn, [slice_id], tmp_path / "run")
 
     assert len(conv.calls) == 1, "valid citations cost zero extra calls"
     assert not any("<REPAIR>" in t for t in conv.texts)
+    assert manifest["refused_repair"] is False
 
 
 def test_the_repairs_answer_ships_even_when_still_invalid(
@@ -1030,6 +1132,48 @@ def test_the_repairs_answer_ships_even_when_still_invalid(
     assert still_bad in Path(manifest["response_path"]).read_text(), (
         "the repair's answer is the deliverable, residual defects and all"
     )
+
+
+def _no_room_after_the_answer(conv):
+    """The answer's turn filled the context: any further turn is over it."""
+    conv.context_remaining = lambda appending=(): -1
+
+
+def test_an_answer_whose_repair_has_no_room_ships_as_written(
+    monkeypatch, distilled_db, tmp_path
+):
+    """A completed analysis is never destroyed: where the repair turn would not fit the context, it is not sent, and the answer ships with its defects, the manifest saying the repair was refused."""
+    conn = connect(distilled_db)
+    slice_id = best_slice(conn)
+    bad = "Something happened [00:99.100]."
+    conv = ScriptedConversation([Response(text=bad)], system_prompt=SYSTEM)
+    _no_room_after_the_answer(conv)
+    _wire(monkeypatch, conv)
+
+    manifest = _analysis(conn, [slice_id], tmp_path / "run")
+
+    assert len(conv.calls) == 1, "no repair turn sent"
+    assert not any("<REPAIR>" in t for t in conv.texts)
+    assert bad in Path(manifest["response_path"]).read_text()
+    assert manifest["refused_repair"] is True
+    assert (
+        json.loads((tmp_path / "run" / "window.json").read_text())["refused_repair"]
+        is True
+    ), "the record says why the defects stand"
+
+
+def test_an_empty_answer_with_no_room_to_ask_again_fails_loud(
+    monkeypatch, distilled_db, tmp_path
+):
+    conn = connect(distilled_db)
+    slice_id = best_slice(conn)
+    conv = ScriptedConversation([Response(text="   ")], system_prompt=SYSTEM)
+    _no_room_after_the_answer(conv)
+    _wire(monkeypatch, conv)
+
+    with pytest.raises(RuntimeError, match="no room is left in the context"):
+        _analysis(conn, [slice_id], tmp_path / "run")
+    assert len(conv.calls) == 1
 
 
 def test_a_bare_citation_in_a_labeled_window_gets_repaired(

@@ -7,7 +7,13 @@ import itertools
 import json as _json
 
 import pytest
-from _analysis_support import GEMINI, install_offline_count, offline_image_tokens
+from _analysis_support import (
+    GEMINI,
+    OFFLINE_GRID,
+    install_offline_count,
+    offline_image_tokens,
+    offline_processed_size,
+)
 from locus.analysis import budget
 from locus.analysis.budget import CostModel, Count, price_payload, window_payload
 from locus.analysis.select_screenshots import screenshot_moments
@@ -180,28 +186,88 @@ def _price(conn, sids, budget_tokens, model=None, **kwargs):
     )
 
 
-def test_image_geometry_realizes_the_per_image_token_ceiling():
+def test_image_geometry_sizes_any_viewport_to_the_per_image_token_value():
     model = "any"
-    assert budget.image_geometry(model, 390, 663, 600) == (390, 663), (
-        "a screenshot under the ceiling passes untouched — never upscaled"
+    for size, value in [
+        ((390, 663), 600),
+        ((1920, 921), 600),
+        ((2560, 1323), 1200),
+        ((390, 844), 1200),
+        ((209, 2804), 300),
+        ((390, 12000), 600),
+    ]:
+        width, height = budget.image_geometry(model, *size, value)
+        assert width % OFFLINE_GRID == 0 and height % OFFLINE_GRID == 0, (
+            "the size lands on the processor's grid, so the server resizes no further"
+        )
+        across, down = width // OFFLINE_GRID, height // OFFLINE_GRID
+        assert across * down <= value, "the image's cost fits the value"
+        # Each side is floored from its scaled length by under one cell, and the scale is the
+        # largest whose floor fits, so the cost misses the value by at most a cell per side.
+        assert across * down >= value * (1 - 1 / across) * (1 - 1 / down), (
+            "the cost is under the value by at most a cell per side, at any viewport size"
+        )
+        assert across / (down + 1) < size[0] / size[1] < (across + 1) / down, (
+            "aspect preserved to within a cell per side"
+        )
+    assert budget.image_geometry(model, 390, 663, 600)[0] > 390, (
+        "a small viewport is scaled up"
     )
-    width, height = budget.image_geometry(model, 1920, 921, 600)
-    assert (width, height) != (1920, 921)
-    assert offline_image_tokens(model, width, height) <= 600, (
-        "the ceiling is a hard bound on what the sent image costs"
+    assert budget.image_geometry(model, 5000, 40, 100) == (3200, OFFLINE_GRID), (
+        "a sliver keeps one whole cell on its short side, as the processor does"
     )
-    assert offline_image_tokens(model, width, height) > 540, (
-        "the resize lands near the ceiling, not far under it"
-    )
-    assert abs(width / height - 1920 / 921) < 0.05, "aspect preserved"
 
 
-def test_a_ceiling_below_the_smallest_image_fails_loud(monkeypatch):
+def _limited_processor(monkeypatch, *, smallest, largest):
+    """The offline processor with pixel limits like the real one's: it encodes an image of `smallest` to `largest` grid cells at its own size, enlarges anything smaller and shrinks anything larger. Returns the cell count of every image whose cost was taken."""
+    from locus.analysis.mlx import count
+
+    def processed(model, width, height):
+        width, height = offline_processed_size(model, width, height)
+        cells = width * height // OFFLINE_GRID**2
+        if cells < smallest:
+            return width * 2, height
+        if cells > largest:
+            return width // 2, height
+        return width, height
+
+    probed = []
+
+    def tokens(model, width, height):
+        probed.append(width * height // OFFLINE_GRID**2)
+        return offline_image_tokens(model, width, height)
+
+    monkeypatch.setattr(count, "processed_size", processed)
+    monkeypatch.setattr(count, "image_tokens", tokens)
+    return probed
+
+
+def test_a_value_below_the_smallest_image_fails_loud(monkeypatch):
     from locus.analysis.mlx import count
 
     monkeypatch.setattr(count, "image_tokens", lambda model, w, h: 66 + w * h // 1024)
-    with pytest.raises(ValueError, match="ceiling"):
+    with pytest.raises(ValueError, match="below the cost"):
         budget.image_geometry("any", 1920, 921, 10)
+
+
+def test_a_value_met_only_by_images_the_processor_enlarges_fails_loud(monkeypatch):
+    _limited_processor(monkeypatch, smallest=50, largest=10_000)
+    with pytest.raises(ValueError, match="below the cost"):
+        budget.image_geometry("any", 1920, 921, 40)
+
+
+def test_a_value_past_the_largest_image_fails_loud_without_building_it(monkeypatch):
+    probed = _limited_processor(monkeypatch, smallest=1, largest=100)
+    # At 1920x921, 14 x 7 cells is the largest the processor encodes; 15 x 7 is past it.
+    cost = 14 * 7
+    assert budget.image_geometry("any", 1920, 921, cost) == (448, 224), (
+        "a value equal to the largest image's cost gives that image"
+    )
+    with pytest.raises(ValueError, match=f"above the cost.*costs {cost}"):
+        budget.image_geometry("any", 1920, 921, cost + 1)
+    with pytest.raises(ValueError, match="above the cost"):
+        budget.image_geometry("any", 1920, 921, 10**12)
+    assert max(probed) <= 100, "no image larger than the processor encodes is costed"
 
 
 def _local(conn, sids, moments, tools=(TOOL,)):
@@ -213,16 +279,16 @@ def _local(conn, sids, moments, tools=(TOOL,)):
     return counted
 
 
-def test_a_local_screenshot_is_priced_at_its_moments_viewport_under_the_ceiling(conn):
-    """The replayer sizes its frame at every Meta and ViewportResize it applies, so a visitor who resizes mid-slice changes the size of every screenshot after — and each is then sent shrunk under the card's activity ceiling, so that is the size the server counts."""
-    from locus.analysis.model.cards import max_image_tokens
+def test_each_local_screenshot_is_priced_from_its_own_moments_viewport(conn):
+    """The replayer resizes its frame at every Meta and ViewportResize, so a mid-slice resize changes the viewport of every later screenshot. Each is drawn at the size the card's activity value gives its own viewport, and the server counts that size."""
+    from locus.analysis.model.cards import image_tokens
 
     _resize(conn, 1, 3_000, 1366, 917)
-    ceiling = max_image_tokens(LOCAL_CARD)["activity_screenshots"]
+    value = image_tokens(LOCAL_CARD)["activity_screenshots"]
     counted = _local(conn, [1], {1: [2_000, 4_500]})
     assert counted.screenshot_tokens == offline_image_tokens(
-        None, 390, 663
-    ) + offline_image_tokens(None, *budget.image_geometry("any", 1366, 917, ceiling))
+        None, *budget.image_geometry("any", 390, 663, value)
+    ) + offline_image_tokens(None, *budget.image_geometry("any", 1366, 917, value))
 
 
 def test_a_local_price_is_the_request_a_run_sends(conn):
@@ -241,6 +307,42 @@ def test_a_local_price_is_the_request_a_run_sends(conn):
         _json.dumps([{"type": "function", "function": TOOL}]).split()
     )
     assert _local(conn, [1], moments, tools=()).text_tokens == _words(texts)
+
+
+def test_a_pulled_value_the_processor_cannot_produce_fails_the_price(conn, monkeypatch):
+    """Every run starts by pricing, so a pulled value the processor cannot produce fails there, before the first pull."""
+    from locus.analysis.model.cards import image_tokens
+
+    values = image_tokens(LOCAL_CARD)
+    largest = (values["activity_screenshots"] + values["pulled_screenshots"]) // 2
+    _limited_processor(monkeypatch, smallest=1, largest=largest)
+    with pytest.raises(
+        ValueError,
+        match=f"image_tokens {values['pulled_screenshots']} is above the cost",
+    ):
+        _local(conn, [1], {1: [2_000]})
+
+
+def test_the_pulled_value_is_sized_at_every_viewport_a_pull_can_reach(
+    conn, monkeypatch
+):
+    from locus.analysis.model.cards import image_tokens
+
+    pulled = image_tokens(LOCAL_CARD)["pulled_screenshots"]
+    sized, geometry = [], budget.image_geometry
+    monkeypatch.setattr(
+        budget,
+        "image_geometry",
+        lambda model, w, h, tokens: (
+            sized.append((w, h, tokens)) or geometry(model, w, h, tokens)
+        ),
+    )
+    _resize(conn, 1, 3_000, 1366, 917)
+    _local(conn, [1], {1: [2_000]})
+    assert {(w, h) for w, h, tokens in sized if tokens == pulled} == {
+        (390, 663),
+        (1366, 917),
+    }, "a viewport no pushed moment shows is still checked for pulls"
 
 
 def test_a_moment_before_any_viewport_is_unpriceable(conn):

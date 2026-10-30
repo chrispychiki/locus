@@ -104,7 +104,7 @@ def evaluate_answer(
 ) -> dict:
     """`slices` is the analyzed window's slice table exactly as window.json carries it: it interpolates the extraction prompt's citation format and scopes every claim span to its cited slice through the shared resolution lookup. record_root is where the measurement's own conversations leave their transcripts — extraction/ and judge/ beneath it, assigned here by the same motion that runs them. The measurement is as auditable as what it measures; there is no unrecorded arm.
 
-    Parity: `pushed_moments` is the set of (label, ts) the analysis pushed as activity-screenshots, and `analysis_media_resolution` the tier table its conversation ran with — both from the analysis's record. The judge's conversation is built on that table and re-shows each screenshot as the kind it rode, so the instrument reads the evidence at exactly the resolution the model did. An analysis whose record states no tier table (a local backend) passes neither, and the judge's screenshots ride the one economics that backend has."""
+    Parity: `pushed_moments` is the set of (label, ts) the analysis pushed as activity-screenshots, and `analysis_media_resolution` the tier table its conversation ran with — both from the analysis's record. The judge's conversation is built on that table and re-shows each screenshot as the kind it rode, so the instrument reads the evidence at exactly the resolution the model did. A local analysis records no tier table: its screenshot files were drawn at their kind's size, so each is shown again as the same file."""
     labels = [s["label"] for s in slices]
     extraction = conversation_factory(
         model,

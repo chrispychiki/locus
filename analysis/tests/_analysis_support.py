@@ -87,13 +87,24 @@ class Verdicts:
         self.evaluations = evaluations
 
 
+OFFLINE_GRID = 32
+
+
 def offline_image_tokens(model, width, height):
-    """The offline count's price of one image: a token per started 32x32 block of pixels."""
-    return -(-width // 32) * -(-height // 32)
+    """The offline count's price of one image: a token per started grid cell of pixels."""
+    return -(-width // OFFLINE_GRID) * -(-height // OFFLINE_GRID)
+
+
+def offline_processed_size(model, width, height):
+    """The offline processor's sizing: each side up to the next whole grid cell."""
+    return (
+        -(-width // OFFLINE_GRID) * OFFLINE_GRID,
+        -(-height // OFFLINE_GRID) * OFFLINE_GRID,
+    )
 
 
 def install_offline_count(monkeypatch):
-    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in the mlx suites; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at — so a suite's expected counts are its own arithmetic."""
+    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in the mlx suites; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at, sized on an OFFLINE_GRID-pixel grid — so a suite's expected counts are its own arithmetic."""
     import json
 
     from locus.analysis.mlx import count
@@ -117,6 +128,8 @@ def install_offline_count(monkeypatch):
 
     monkeypatch.setattr(count, "prompt_tokens", prompt_tokens)
     monkeypatch.setattr(count, "image_tokens", offline_image_tokens)
+    monkeypatch.setattr(count, "grid", lambda model: OFFLINE_GRID)
+    monkeypatch.setattr(count, "processed_size", offline_processed_size)
 
 
 class ScriptedConversation(Conversation):
@@ -154,13 +167,33 @@ class ScriptedConversation(Conversation):
     def image_tokens(self, image_path):
         return 1
 
+    def screenshot_size(self, width, height, *, pushed):
+        return width, height
+
     def context_remaining(self, appending=()):
-        pending = sum(1 for part in appending if part[0] == "image")
+        from locus.analysis.model.protocol import tool_parts
+
+        pending = sum(1 for part in appending if part[0] == "image") + sum(
+            1
+            for part in appending
+            if part[0] == "tool"
+            for kind, _ in tool_parts(part[2])
+            if kind == "image"
+        )
         return self.room - len(self.images) - pending
 
-    def _add_tool_result(self, call_id, content):
+    def _add_tool_result(self, call_id, parts):
+        """A reply that is text alone is kept as its string; one with images keeps its parts, and its images count against the room like any other."""
+        content = parts[0][1] if [kind for kind, _ in parts] == ["text"] else parts
         self.parts.append(("tool", call_id, content))
         self.tool_results.append((call_id, content))
+        sent = []
+        for kind, value in parts:
+            if kind == "image":
+                self.images.append(str(value))
+                self.image_pushed.append(False)
+                sent.append(f"sent://{value}")
+        return sent
 
     def _get_response(self, *, response_schema=None, tools=None):
         self.calls.append(

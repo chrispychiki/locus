@@ -1384,3 +1384,59 @@ def test_the_boot_refuses_a_count_setting_only_its_shell_holds(monkeypatch):
     monkeypatch.setattr(serve.sys, "argv", ["locus-mlx-serve", slug])
     with pytest.raises(SystemExit, match="MLX_VLM_MAX_PIXELS set in the environment"):
         serve.main()
+
+
+def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
+    """Each patch is proven where it lives; this proves the boot runs every one of them before the server takes a request, so a dropped install call cannot pass the suite."""
+    import mlx.core as mx
+    from locus.analysis.mlx import (
+        chat_turns,
+        fused_attention,
+        presence_penalty,
+        vision_chunking,
+    )
+    from mlx_vlm.server import app as server_app
+
+    slug = "qwen3.6-35b-a3b-6bit"
+    for key, value in serve.serving_env(slug).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("MLX_VLM_PRELOAD_MODEL", serve._card(slug)["model"])
+    installed = []
+
+    def recording(name):
+        return lambda *args, **kwargs: installed.append(name)
+
+    for module, name in [
+        (serve, "install_heif_decode"),
+        (serve, "install_preprocess_serializer"),
+        (serve, "install_pixel_release"),
+        (serve, "install_prompt_recording"),
+        (serve, "install_gpu_tracking"),
+        (vision_chunking, "install_vision_encode_chunking"),
+        (fused_attention, "install_fused_attention"),
+        (presence_penalty, "install_presence_penalty"),
+        (chat_turns, "install_chat_turns"),
+        (serve, "serve_guarded"),
+    ]:
+        monkeypatch.setattr(module, name, recording(name))
+    monkeypatch.setattr(serve, "install_log_handler", lambda: None)
+    monkeypatch.setattr(serve, "_wired_cap_bytes", lambda: 2**30)
+    monkeypatch.setattr(mx, "set_wired_limit", lambda cap: None)
+    monkeypatch.setattr(mx, "set_memory_limit", lambda cap: None)
+    monkeypatch.setattr(server_app, "add_middleware", lambda *args, **kwargs: None)
+    monkeypatch.setattr(serve.sys, "argv", ["locus-mlx-serve", slug])
+
+    serve.main()
+
+    assert installed[-1] == "serve_guarded"
+    assert set(installed[:-1]) == {
+        "install_heif_decode",
+        "install_preprocess_serializer",
+        "install_pixel_release",
+        "install_prompt_recording",
+        "install_gpu_tracking",
+        "install_vision_encode_chunking",
+        "install_fused_attention",
+        "install_presence_penalty",
+        "install_chat_turns",
+    }

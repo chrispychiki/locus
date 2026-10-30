@@ -909,7 +909,9 @@ def test_compose_window_shape(distilled_db, tmp_path):
     screenshot_dir = tmp_path / "screenshots"
     screenshot_dir.mkdir()
     for ts in selection.timestamps:
-        (screenshot_dir / f"S1_screenshot_{ts}.png").write_bytes(b"\x89PNG fake")
+        (screenshot_dir / f"S1_activity_screenshot_{ts}.png").write_bytes(
+            b"\x89PNG fake"
+        )
 
     conversation = FakeConversation()
     manifest = compose_window(
@@ -1024,7 +1026,9 @@ def test_the_screenshot_plane_opens_at_the_covering_snapshot(distilled_db, tmp_p
 
     screenshot_dir = tmp_path / "screenshots"
     screenshot_dir.mkdir()
-    (screenshot_dir / f"S1_screenshot_{row.start_ts}.png").write_bytes(b"\x89PNG fake")
+    (screenshot_dir / f"S1_activity_screenshot_{row.start_ts}.png").write_bytes(
+        b"\x89PNG fake"
+    )
     with pytest.raises(ValueError, match="screenshot-addressable"):
         compose_window(
             conn,
@@ -1081,7 +1085,7 @@ def test_every_screenshot_has_a_text_anchor_at_its_timestamp(distilled_db, tmp_p
     ).fetchone()
     screenshot_dir = tmp_path / "screenshots"
     screenshot_dir.mkdir()
-    (screenshot_dir / f"S1_screenshot_{suppressed['t']}.png").write_bytes(
+    (screenshot_dir / f"S1_activity_screenshot_{suppressed['t']}.png").write_bytes(
         b"\x89PNG fake"
     )
 
@@ -1113,7 +1117,9 @@ def test_compose_prefetches_the_window_screenshots_before_adding_any(
     screenshot_dir = tmp_path / "screenshots"
     screenshot_dir.mkdir()
     for ts in selection.timestamps:
-        (screenshot_dir / f"S1_screenshot_{ts}.png").write_bytes(b"\x89PNG fake")
+        (screenshot_dir / f"S1_activity_screenshot_{ts}.png").write_bytes(
+            b"\x89PNG fake"
+        )
 
     class PrefetchSpy(FakeConversation):
         def __init__(self):
@@ -1135,7 +1141,7 @@ def test_compose_prefetches_the_window_screenshots_before_adding_any(
 
     assert conversation.prefetched == [
         sorted(
-            str(screenshot_dir / f"S1_screenshot_{ts}.png")
+            str(screenshot_dir / f"S1_activity_screenshot_{ts}.png")
             for ts in selection.timestamps
         )
     ]
@@ -1533,3 +1539,28 @@ def test_head_event_skips_identify_but_never_an_unattested_head(tmp_path):
     assert head["url"] is None, (
         "a head that carries no url stays unattested — the read never skips forward to a later page event"
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_moment_rendered_as_both_kinds_indexes_its_pulled_file(
+    tmp_path, monkeypatch, reverse
+):
+    """A moment pushed and then pulled was last shown to the model as its pull, so the pulled file is indexed, whichever file the directory lists first."""
+    from pathlib import Path
+
+    for name in (
+        "S1_activity_screenshot_5000.png",
+        "S1_pulled_screenshot_5000.png",
+        "S1_activity_screenshot_6000.png",
+    ):
+        (tmp_path / name).write_bytes(b"png")
+    glob = Path.glob
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda self, pattern: iter(sorted(glob(self, pattern), reverse=reverse)),
+    )
+    assert screenshot_index([tmp_path]) == {
+        ("S1", 5000): tmp_path / "S1_pulled_screenshot_5000.png",
+        ("S1", 6000): tmp_path / "S1_activity_screenshot_6000.png",
+    }

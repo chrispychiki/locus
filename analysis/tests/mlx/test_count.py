@@ -72,26 +72,67 @@ def test_the_tool_declarations_and_the_thinking_switch_are_counted():
     ) != count.prompt_tokens(_request(parts, extra_body={"enable_thinking": True}))
 
 
-def test_image_geometry_realizes_the_per_image_token_ceiling():
-    assert budget.image_geometry(MODEL, 390, 663, 600) == (390, 663), (
-        "a screenshot under the ceiling passes untouched — never upscaled"
+def test_image_geometry_sizes_any_viewport_to_the_per_image_token_value():
+    cell = count.grid(MODEL)
+    for size, value in [
+        ((390, 663), 600),
+        ((390, 844), 1200),
+        ((1920, 921), 600),
+        ((2560, 1323), 1200),
+        ((390, 12000), 600),
+    ]:
+        width, height = budget.image_geometry(MODEL, *size, value)
+        cost = count.image_tokens(MODEL, width, height)
+        assert cost <= value, "the image's full cost fits the value"
+        assert cost > value * 0.9, (
+            "the image costs within 10% of the value at any viewport size"
+        )
+        assert width % cell == 0 and height % cell == 0, "the size lands on the grid"
+        assert count.processed_size(MODEL, width, height) == (width, height), (
+            "the processor encodes the screenshot at its own size"
+        )
+
+
+def test_the_processor_sizes_by_its_own_rule():
+    assert count.grid(MODEL) == 32
+    assert count.processed_size(MODEL, 1120, 544) == (1120, 544), "on the grid, as is"
+    assert count.processed_size(MODEL, 1000, 500) == (992, 512), (
+        "off it, rounded to cells"
     )
-    width, height = budget.image_geometry(MODEL, 1920, 921, 600)
-    cost = count.image_tokens(MODEL, width, height)
-    assert cost <= 600, "the ceiling bounds everything the image adds"
-    assert cost > 540, "the resize lands near the ceiling, not far under it"
-    assert abs(width / height - 1920 / 921) < 0.05, "aspect preserved"
 
 
-def test_a_ceiling_below_the_smallest_image_fails_loud():
-    with pytest.raises(ValueError, match="smallest image"):
-        budget.image_geometry(MODEL, 1920, 921, 10)
+def test_a_value_the_processor_cannot_produce_fails_loud():
+    for value in (10, count.image_tokens(MODEL, 32, 32)):
+        with pytest.raises(ValueError, match="below the cost"):
+            budget.image_geometry(MODEL, 1920, 921, value)
+    largest = count.image_tokens(MODEL, 4096, 4096)
+    with pytest.raises(ValueError, match="above the cost"):
+        budget.image_geometry(MODEL, 1920, 921, largest)
+    with pytest.raises(ValueError, match="above the cost"):
+        budget.image_geometry(MODEL, 1920, 921, 10**9)
 
 
 def test_an_unjudged_upstream_refuses_to_count(monkeypatch):
     monkeypatch.setattr(count, "EXPECTED_CHAT_HANDLER_SHA256", "0" * 64)
     with pytest.raises(SystemExit, match="upstream drift"):
         count._verify_upstream()
+
+
+def test_an_image_processor_outside_the_judged_modules_refuses_to_count():
+    """grid and processed_size read the image processor's sizing, so the image processor is judged by its own module, never through the processor holding it."""
+
+    class Unjudged:
+        patch_size, merge_size = 16, 2
+
+    with count._serving(MODEL):
+        processor, _ = count._resources(MODEL)
+    held = processor.image_processor
+    processor.image_processor = Unjudged()
+    try:
+        with pytest.raises(SystemExit, match="Unjudged"):
+            count._verify_processor(processor)
+    finally:
+        processor.image_processor = held
 
 
 def _all_at_once(request):

@@ -1,11 +1,15 @@
 """Thin locus layer over the upstream mlx-vlm server.
 
 Upstream (mlx_vlm.server) owns generation: continuous batching, structured output, thinking budget, APC prefix caching, speculative decode, vision feature cache.
-This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), and two math-preserving patches (the vision-encode chunking, the fused attention). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
+This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent (chat_turns.py), and two math-preserving patches (the vision-encode chunking, the fused attention). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
 README.md says what each is for.
 
 Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
 - min_p is accepted per-request but never reaches the batched sampler; the cards therefore do not claim it.
+- the presence penalty is taken off every token among the last presence_context_size of the whole sequence, the prompt included, while the cards' value is set for a penalty over the generated tokens alone.
+  Patched here: presence_penalty.install_presence_penalty penalizes every generated token and none of the prompt.
+- the chat template reads a tool message's images, an assistant answer's reasoning and the request's template options, but upstream drops the first two before the template and gives a request no way to pass the third (chat_template_kwargs).
+  Patched here: chat_turns.install_chat_turns carries all three to the template.
 - a request's images encode in one batch, so the vision-encode transient scales with the request's total pixels and no token-denominated guard bounds it — a large enough image batch aborts the server even when it fits the token context (MAX_KV_SIZE counts expanded vision tokens, so its guard doesn't close this).
   Patched here: vision_chunking.install_vision_encode_chunking encodes in pixel-bounded chunks, output-identical on the pinned upstream.
 - on GPUs without neural accelerators, mlx reads a multi-token chunk of a head-dim-256 model by materializing its whole score table, so prefill memory grows with the prompt (16 GiB per 2,048-token chunk at 256k keys).
@@ -808,6 +812,20 @@ def main() -> None:
     from mlx_vlm.server import app
 
     install_prompt_recording()
+
+    from .presence_penalty import install_presence_penalty
+
+    install_presence_penalty()
+    logger.info(
+        "presence penalty installed: a request's presence_penalty is taken off every token it has generated, and none of its prompt"
+    )
+
+    from .chat_turns import install_chat_turns
+
+    install_chat_turns()
+    logger.info(
+        "chat turns installed: a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the chat template"
+    )
 
     admission = Admission()
     install_gpu_tracking(admission)

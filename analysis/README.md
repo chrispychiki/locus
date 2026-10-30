@@ -20,7 +20,7 @@ analyses/{utc-stamp}_{visitor}-{disambiguator}[_plusN]/  one analysis: occasion,
     analysis.log                                     everything the run said as it went
     window.json                                      the machine manifest — question, clock anchor, slice table
     N_answer_input.txt  N_answer_response.txt  N_answer_meta.json
-    screenshots/{label}_screenshot_{ms}.png
+    screenshots/{label}_{activity|pulled}_screenshot_{ms}.png
 ```
 
 The answer is the record itself: the final `N_answer_response.txt` — thoughts where the backend exposes them, the meta section addressed to whoever tunes the system when the model wrote one, and the cited answer, exactly as the wire returned them — with `window.json` carrying everything a reader wants beside it: the question, the absolute clock the cited offsets anchor to, and the slice table.
@@ -46,7 +46,9 @@ Two transports have that property, and `model/factory.py` is the only place a mo
 - **An oversized model-payload is refused with its price.** The bare `locus analyze` invocation is the price report — exact tokens, context percentage, per-slice standalone prices — and a run whose model-payload out-prices the budget is refused with that report attached.
   When one slice alone out-prices the budget, the report enumerates the slice's route-boundary pieces, each priced and addressable as `<slice>#<k>`, so the agent picks a coherent piece by structure, never by milliseconds.
 - **Screenshot spend has two owners.** The activity-screenshot interval — a flag on `locus analyze` — thins the pushed screenshots on either backend.
-  What each screenshot costs on the wire is the model card's (its file in `config/cards/`): a local card declares a per-image token ceiling per kind (`max_image_tokens`) — the most one image may add to the server's count, its start and end markers included — which its backend realizes by downscaling at the wire and pricing what it sent, while a Gemini card declares a flat-priced resolution tier per kind — either way one for activity-screenshots, one for the screenshots a pull returns any moment as, pushed or not.
+  What each screenshot costs on the wire is the model card's (its file in `config/cards/`), which declares one value for activity-screenshots and one for pulled screenshots; a pull can show any moment, pushed or not.
+  A local card's `image_tokens` is the token count of one screenshot of each kind, at any viewport: the renderer draws each screenshot at the largest size whose cost fits that value, and the file on disk is what is sent. Pricing fails on a value the processor cannot produce at a viewport in the window.
+  A Gemini card's `media_resolution` names a flat-priced resolution tier per kind. Gemini sizes each screenshot to its tier itself, so the screenshot is rendered at the viewport's own pixels.
 - **Selection is the agent's; composition is the engine's.** Which slices deserve the model's read, and how to whittle an over-priced analysis, is judgment informed by the price report.
   Composing the chosen set into one evidence window — one shared clock, every slice labeled, the activity-screenshots, the event stream — is invariant-bound mechanics, so `analyze` owns it.
 - **A window is any slice set on one shared clock.** Each named slice is labeled S1..Sn in time order — the label a window-local abbreviation of the slice id — and slices may overlap in time — a second tab, concurrent visitors — their offsets genuinely overlapping on the one clock rather than being serialized apart.
@@ -132,6 +134,10 @@ Only what upstream lacks and a resident model demands:
   One process-wide lock closes the race; GPU batching is untouched.
 - **Pixel arrays released at encode** — upstream's GPU loop keeps a request's pixel arrays referenced after encoding them, through its prefill and decode and until the next request arrives — over 1 GiB for 47k image tokens, held through the prefill peak.
   The server drops them from the request's inputs once they are encoded; nothing reads them after, and the vision cache keeps its own encoded copy. Keyed to upstream's source.
+- **The presence penalty over what the model generated** — upstream takes a request's `presence_penalty` off every token among the last `presence_context_size` of the whole sequence, the prompt included, so the penalty lands on the names, ids and tool syntax the model has to quote back from its prompt.
+  `presence_penalty.py` takes it off every token the request has generated and none of its prompt, the meaning the option has in vLLM and SGLang, the engines the model's makers name for serving it. Keyed to upstream's source.
+- **Every turn reaching the template as it was sent** — Qwen's chat template renders a tool reply's images in place and, under the `preserve_thinking` option its model card recommends for agent use, every assistant turn's reasoning. Upstream drops a tool message's images and an assistant answer's reasoning before the template, and gives a request no way to pass the template an option.
+  `chat_turns.py` carries all three: a request's `chat_template_kwargs`, the field vLLM and SGLang take, reach the template, and an option the template doesn't read, or that the request or the server already sets, is refused. Keyed to upstream's source.
 - **The rendered-prompt record** — the server records each request's rendered prompt, the exact templated string upstream hands the tokenizer, at `data/mlx/rendered_prompt.txt` (latest request wins), so where the template put each part and image is checkable against the wire.
 - **Pixel-bounded vision encode** — upstream encodes a request's entire image set as one graph, so the encode's memory transient grows with total pixels and a large enough image set kills the server with an uncatchable Metal OOM even when it fits the model's context.
   `vision_chunking.py` encodes in contiguous whole-image chunks bounded by `LOCUS_MLX_ENCODE_CHUNK_MPX`, output-identical on the pinned upstream — attention is image-local, so nothing crosses chunk boundaries — and keyed to upstream's source.

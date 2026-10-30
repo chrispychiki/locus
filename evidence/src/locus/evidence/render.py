@@ -4,6 +4,8 @@ The rendered screenshots ARE the visual evidence the model grounds on, so a sile
 - Render in a PAINTING browser. The native ::selection highlight only paints in a painting context (https://www.w3.org/TR/css-pseudo-4/#highlight-painting), so a non-painting context silently drops every text selection from the screenshot. Chromium launches with --headless=new — the real Chrome browser — which paints without a display; truly-headed also works but needs one.
 - Replay with pauseAnimation off, and finish every finite animation before the screenshot. A reveal animation frozen at its start — content captured at opacity:0 with a reveal transition — renders blank; finished, it renders its revealed end state. A repeating animation, a spinner, has no end state and keeps running. (pauseAnimation injects animation-play-state: paused via the rrweb-paused class: rrweb packages/rrweb/src/replay/index.ts.)
 
+Each screenshot is drawn at the pixel size its caller asks for (capture's `size`): the page is laid out at the visitor's viewport and drawn at the device scale that gives that size, so the browser renders the detail at that density. When the size does not keep the viewport's proportions, one side is then resampled to fit. The replayed page fills the screenshot to every edge, with no border or offset from the harness.
+
 Opens the slice in the vendored rrweb replayer at each requested timestamp and screenshots. rrweb inlines stylesheets but not images or fonts (rrweb-snapshot defaults inlineStylesheet true, inlineImages false: rrweb packages/rrweb-snapshot/src/snapshot.ts), so those fetch live at replay; each capture builds the snapshot page and waits on its fonts and images before seeking, then waits again on what the moment added (image decode, fonts, a capped settle), so a slow connection costs latency, not blank screenshots or short-landed scrolls. What waiting can't recover — resources 404'd or changed since recording — rides on the screenshot as its faults, failed resources named by URL, never silently captured over.
 
 Assets behind session cookies or referer checks 403 at replay and surface as failed-image URLs in the screenshot's faults; record-time inlining is the only true fix, shared with any renderer.
@@ -12,9 +14,13 @@ Assets behind session cookies or referer checks 403 at replay and surface as fai
 import json
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Self
+
+from PIL import Image
 
 from .assets import rrweb_constants_js, vendored
 from .rrweb_constants import EventType, IncrementalSource, MouseInteractions
@@ -50,6 +56,9 @@ HARNESS = """<!DOCTYPE html>
     <meta charset="utf-8">
     <style>
       body, html {{ margin: 0; padding: 0; }}
+      /* The browser draws an iframe with a 2px border by default, which would sit inside the
+         screenshot and push the replayed page off its right and bottom edges. */
+      #replayer iframe {{ border: 0; }}
       .replayer-mouse.mouse-down::after {{
         background: #b30713 !important;
         border: 2px solid #8a050f !important;
@@ -156,6 +165,30 @@ def _mouse_pressed_at(events: list[dict], timestamps: list[int]) -> dict[int, bo
             pressed = value
         states[ts] = pressed
     return states
+
+
+# An analysis's two kinds of screenshot: the activity-screenshots its window pushes, and the
+# screenshots a pull serves.
+SCREENSHOT_KINDS = ("activity", "pulled")
+
+
+def screenshot_name(label: str, kind: str, ts: int) -> str:
+    """A screenshot file's name, its identity: the slice label, the kind, the moment."""
+    return f"{label}_{kind}_screenshot_{ts}.png"
+
+
+def read_screenshot_name(name: str) -> tuple[str, str, int]:
+    """(label, kind, ts) parsed from a screenshot_name; raises on a name of any other shape."""
+    stem, _, ts = name.removesuffix(".png").rpartition("_screenshot_")
+    label, _, kind = stem.rpartition("_")
+    if not (
+        name.endswith(".png") and label and kind in SCREENSHOT_KINDS and ts.isdigit()
+    ):
+        raise ValueError(
+            f"{name!r} is not a screenshot name — those are {{label}}_{{kind}}_screenshot_{{ts}}.png, "
+            f"kind one of {list(SCREENSHOT_KINDS)}"
+        )
+    return label, kind, int(ts)
 
 
 @dataclass
@@ -292,6 +325,7 @@ class RenderSession:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self._loaded: str | None = None
         self._viewport: dict | None = None
+        self._scale: float | None = None
         self._inflight: dict = {}
         self._done: dict = {}
         self._pw = self._browser = self.page = self._harness_path = None
@@ -308,17 +342,26 @@ class RenderSession:
             self._harness_path = f.name
         return self
 
-    def _ensure_browser(self) -> None:
-        if self._browser is not None:
+    def _ensure_page(self, label: str, scale: float) -> None:
+        """A page drawing at device scale `scale`. A page's scale is fixed when it is created, so a capture at another scale gets a new page, and the slice is loaded into it again."""
+        if self.page is not None and self._scale == scale:
             return
         import time
 
-        from playwright.sync_api import sync_playwright
+        if self._browser is None:
+            from playwright.sync_api import sync_playwright
 
-        self._pw = sync_playwright().start()
-        self._browser = launch_chromium(self._pw)
-        self._viewport = dict(next(iter(self.slices.values())).viewport)
-        self.page = self._browser.new_page(viewport=self._viewport)
+            self._pw = sync_playwright().start()
+            self._browser = launch_chromium(self._pw)
+        if self.page is not None:
+            self.page.close()
+        self._inflight.clear()
+        self._loaded = None
+        self._viewport = dict(self.slices[label].viewport)
+        self._scale = scale
+        self.page = self._browser.new_page(
+            viewport=self._viewport, device_scale_factor=scale
+        )
         self.page.on("request", lambda r: self._inflight.__setitem__(r, time.time()))
         for settled in ("requestfinished", "requestfailed"):
             self.page.on(settled, self._settled)
@@ -338,6 +381,7 @@ class RenderSession:
             self._pw.stop()
             self._pw = None
         self.page = None
+        self._scale = None
         self._loaded = None
         self._inflight.clear()
 
@@ -366,25 +410,51 @@ class RenderSession:
         )
         self._loaded = label
 
-    def capture(self, label: str, ts: int) -> ScreenshotResult:
-        """Capture the slice labeled `label` at absolute ms `ts` — the DOM after every event stamped at or before it. The label is the address — a timestamp alone routes nowhere, because two slices may cover the same instant. The screenshot file's name is its identity: {label}_screenshot_{ts}.png, the vocabulary the window's citations use. A moment the slice holds no page at — outside its recording, or in its lead ahead of the covering snapshot — is refused: a file stamped with a time the pixels never held would read as evidence of it."""
+    def capture(
+        self,
+        label: str,
+        ts: int,
+        *,
+        kind: str,
+        size: Callable[[int, int], tuple[int, int]],
+    ) -> ScreenshotResult:
+        """Capture the slice labeled `label` at absolute ms `ts` — the DOM after every event stamped at or before it. The label is the address — a timestamp alone routes nowhere, because two slices may cover the same instant. `kind` is one of SCREENSHOT_KINDS. The file is named by screenshot_name, {label}_{kind}_screenshot_{ts}.png, so one moment captured as both kinds is two files. A moment the slice holds no page at — outside its recording, or in its lead ahead of the covering snapshot — is refused: a file stamped with a time the pixels never held would read as evidence of it.
+
+        `size` maps the slice's viewport at the moment (slices.viewport_at, in CSS pixels) to the screenshot's size in pixels. The page is laid out at the viewport, as the visitor's was, and drawn at the device scale that gives that size. When the size does not keep the viewport's proportions, the page is drawn at the larger side's scale and resampled, bicubic, onto the exact size; that is the only interpolation in a screenshot."""
         if label not in self.slices:
             raise ValueError(
                 f"unknown label {label!r} — this window renders {sorted(self.slices)}"
             )
-        self._ensure_browser()
-        self._ensure_loaded(label)
+        if kind not in SCREENSHOT_KINDS:
+            raise ValueError(
+                f"unknown screenshot kind {kind!r} — the kinds are {list(SCREENSHOT_KINDS)}"
+            )
         sl = self.slices[label]
-        page = self.page
-        gone = page.evaluate("(ts) => LocusSeek.unshowable([window.__slice], ts)", ts)
+
+        def drawn(width: int, height: int) -> tuple[tuple[int, int], float]:
+            target = tuple(size(width, height))
+            return target, max(target[0] / width, target[1] / height)
+
+        if self.page is None:
+            # Most moments show the slice's opening viewport, so a new page starts at its scale.
+            self._ensure_page(label, drawn(**sl.viewport)[1])
+        self._ensure_loaded(label)
+        gone = self.page.evaluate(
+            "(ts) => LocusSeek.unshowable([window.__slice], ts)", ts
+        )
         if gone is not None:
             raise ValueError(f"{label} cannot be captured at {ts} — {gone}")
+        # The screenshot is the slice's viewport at the moment (slices.viewport_at), the
+        # viewport pricing sized it from; the replayer's frame must agree, or the price and
+        # the screenshot disagree.
+        width, height = viewport_at(sl.events, ts)
+        target, scale = drawn(width, height)
+        self._ensure_page(label, scale)
+        self._ensure_loaded(label)
+        page = self.page
         page.evaluate(BUILD_JS)
         page.evaluate(WAIT_READY_JS, READINESS_BUDGET_MS)
         page.evaluate(PAUSE_AT_JS, ts)
-        # The screenshot is the slice's viewport at the moment (slices.viewport_at), the size
-        # pricing counted it at; the replayer's frame must agree, or the price and the screenshot disagree.
-        width, height = viewport_at(sl.events, ts)
         viewport = {"width": width, "height": height}
         frame = page.evaluate(
             """() => {
@@ -415,8 +485,13 @@ class RenderSession:
         faults = page.evaluate(WAIT_READY_JS, READINESS_BUDGET_MS)
         if not _await_network_quiet(page, self._inflight, self._done):
             faults["networkBusy"] = True
-        screenshot_path = self.out_dir / f"{label}_screenshot_{ts}.png"
-        page.screenshot(path=str(screenshot_path))
+        screenshot_path = self.out_dir / screenshot_name(label, kind, ts)
+        drawn = page.screenshot()
+        with Image.open(BytesIO(drawn)) as image:
+            if image.size == target:
+                screenshot_path.write_bytes(drawn)
+            else:
+                image.resize(target, Image.BICUBIC).save(screenshot_path)
         return ScreenshotResult(timestamp=ts, path=str(screenshot_path), faults=faults)
 
     def __exit__(self, *exc) -> None:

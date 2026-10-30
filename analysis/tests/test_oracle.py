@@ -29,7 +29,7 @@ def _make_analysis(
     (analysis_dir / "screenshots").mkdir(parents=True)
     for i in (1, 2):
         (
-            analysis_dir / "screenshots" / f"S1_screenshot_{lo + i * 1000}.png"
+            analysis_dir / "screenshots" / f"S1_activity_screenshot_{lo + i * 1000}.png"
         ).write_bytes(b"\x89PNG")
     (analysis_dir / "window.json").write_text(
         json.dumps(
@@ -241,8 +241,8 @@ def test_two_instruments_scoring_one_analysis_coexist(distilled_db, tmp_path):
 def test_judge_holds_evidence_parity_with_the_analysis(distilled_db, tmp_path):
     """The judge sees the evidence exactly as the model did: its conversation
     is built on the analysis's recorded tier table, a screenshot it pushed
-    re-rides pushed, and a pushed moment the model re-pulled was last seen at
-    the pull tier, so it re-rides as a pull."""
+    is shown as pushed, and a pushed moment the model pulled again was last seen
+    at the pull tier, so its pulled file is shown."""
     from locus.analysis.ground.claims import ClaimVerdict
 
     conn = connect(distilled_db)
@@ -252,6 +252,8 @@ def test_judge_holds_evidence_parity_with_the_analysis(distilled_db, tmp_path):
     manifest["activity_screenshots"] = {"S1": [lo + 1000, lo + 2000]}
     manifest["pulled"] = [["S1", lo + 2000]]
     (analysis_dir / "window.json").write_text(json.dumps(manifest))
+    pulled = analysis_dir / "screenshots" / f"S1_pulled_screenshot_{lo + 2000}.png"
+    pulled.write_bytes(b"\x89PNG")
     table = {"activity_screenshots": "medium", "pulled_screenshots": "high"}
     (analysis_dir / "1_answer_meta.json").write_text(
         json.dumps({"config": {"media_resolution": table}})
@@ -305,6 +307,10 @@ def test_judge_holds_evidence_parity_with_the_analysis(distilled_db, tmp_path):
     assert captured["judge"].image_pushed == [True, False], (
         "the pushed moment re-rides pushed; the re-pulled one as a pull"
     )
+    assert captured["judge"].images == [
+        str(analysis_dir / "screenshots" / f"S1_activity_screenshot_{lo + 1000}.png"),
+        str(pulled),
+    ], "each moment is shown as the file the model saw last"
 
 
 def test_oracle_fails_loud_on_a_missing_transcript(distilled_db, tmp_path):

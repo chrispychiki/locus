@@ -1,8 +1,8 @@
 """The bundled server's own prompt count, run in this process without the server.
 
-A chat-completions request's prompt_tokens is decided on the CPU before the GPU sees anything: upstream renders the model's chat template over the request and runs the model's processor over it and its images (server/openai.py chat_completions_endpoint into server/generation.py _cpu_preprocess). prompt_tokens() runs those same steps through upstream's own functions, on the model's processor and config loaded without its weights, under the environment the server serves the model under (serve.serving_env), so a local card's count is the server's count by construction — offline, nothing booted, no copy of the template, the tokenizer or the image arithmetic kept here. Where the server preprocesses a request's images all at once, the count takes each distinct image size once (prompt_tokens says why that is the same number), so what it holds does not grow with the number of images.
+A chat-completions request's prompt_tokens is decided on the CPU before the GPU sees anything: upstream renders the model's chat template over the request and runs the model's processor over it and its images (server/openai.py chat_completions_endpoint into server/generation.py _cpu_preprocess). prompt_tokens() runs those same steps through upstream's own functions, as the server patches them (chat_turns.py), on the model's processor and config loaded without its weights, under the environment the server serves the model under (serve.serving_env), so a local card's count is the server's count by construction — offline, nothing booted, no copy of the template, the tokenizer or the image arithmetic kept here. Where the server preprocesses a request's images all at once, the count takes each distinct image size once (prompt_tokens says why that is the same number), so what it holds does not grow with the number of images.
 
-The steps follow upstream's chat handler, load and preprocessing, and the shortcut rests on the model's processor, so all are pinned to their source like every upstream-keyed patch (patching.py): a changed source refuses until the steps are re-checked against it.
+The steps follow upstream's chat handler, load and preprocessing, and the shortcut and the sizing (grid, processed_size) rest on the model's processor, so all are pinned to their source like every upstream-keyed patch (patching.py): a changed source refuses until the steps are re-checked against it.
 """
 
 import functools
@@ -76,15 +76,16 @@ EXPECTED_RUNTIME_FROM_ENV_SHA256 = (
     "0fc298c17e9000877f49886dafb69b2181e44b0918d0463fe3c560bf129e5db7"
 )
 
-# The processors the per-image shortcut has been judged on, by module: each expands an image's
-# placeholder from that image's own grid alone.
+# The processors the per-image shortcut and the sizing have been judged on, by module: each
+# expands an image's placeholder from that image's own grid alone, and sizes every image by its
+# image processor's _resolved_size onto cells of patch_size x merge_size.
 JUDGED_PROCESSORS = {
     "mlx_vlm.models.qwen3_vl.processing_qwen3_vl": (
         "9c6bc521ea6b45c3346967502f2d0b69697371327d7b340c23650e76de91f5d2"
     ),
 }
 
-OWES = "Re-check prompt_tokens' steps against the new source and re-pin (analysis/src/locus/analysis/mlx/count.py)."
+OWES = "Re-check prompt_tokens' steps and the image processor's sizing that grid and processed_size read against the new source and re-pin (analysis/src/locus/analysis/mlx/count.py)."
 
 
 def _verify_upstream() -> None:
@@ -148,23 +149,25 @@ def _verify_upstream() -> None:
 
 
 def _verify_processor(processor) -> None:
+    """Refuse unless both the processor, whose expansion the shortcut rests on, and its image processor, whose sizing grid and processed_size read, are classes of a judged module at its judged source."""
     import importlib
 
-    module = type(processor).__module__
-    if module not in JUDGED_PROCESSORS:
-        refuse(
+    for held in (processor, processor.image_processor):
+        module = type(held).__module__
+        if module not in JUDGED_PROCESSORS:
+            refuse(
+                "count",
+                f"the {type(held).__name__}",
+                f"(module {module}) is not one the per-image shortcut and the sizing were judged on",
+                OWES,
+            )
+        expect_source(
             "count",
-            f"the processor {type(processor).__name__}",
-            f"(module {module}) is not one the per-image shortcut was judged on",
+            module,
+            importlib.import_module(module),
+            JUDGED_PROCESSORS[module],
             OWES,
         )
-    expect_source(
-        "count",
-        module,
-        importlib.import_module(module),
-        JUDGED_PROCESSORS[module],
-        OWES,
-    )
 
 
 def _slug(model: str) -> str:
@@ -249,11 +252,14 @@ def _resources(model: str):
         update_module_configs,
     )
 
+    from .chat_turns import install_chat_turns
     from .serve import install_heif_decode
 
     _verify_upstream()
-    # The server decodes HEIF images too, so the count reads what it reads.
+    # The server decodes HEIF images and renders every turn as chat_turns.py has it, so the
+    # count reads and renders what it does.
     install_heif_decode()
+    install_chat_turns()
     kwargs = {
         "trust_remote_code": os.environ.get("MLX_TRUST_REMOTE_CODE", "false").lower()
         == "true",
@@ -305,6 +311,8 @@ def _render(request: dict):
     from mlx_vlm.server.schemas import ChatRequest
     from mlx_vlm.tools.policy import _prepare_chat_tool_choice
 
+    from .chat_turns import CARRIER, IMAGE_ROLES, request_options
+
     body = {key: value for key, value in request.items() if key != "extra_body"}
     body.update(request.get("extra_body", {}))
     chat = ChatRequest(**body)
@@ -312,7 +320,7 @@ def _render(request: dict):
 
     sent, messages = [], []
     for message in chat.messages:
-        if isinstance(message.content, list) and message.role == "user":
+        if isinstance(message.content, list) and message.role in IMAGE_ROLES:
             for item in message.content:
                 if isinstance(item, dict) and item.get("type") == "image_url":
                     sent.append(item["image_url"]["url"])
@@ -330,6 +338,7 @@ def _render(request: dict):
         structured_logits_processor_builder=lambda request, processor: None,
     )
     template_kwargs = gen_args.to_template_kwargs()
+    template_kwargs[CARRIER] = request_options(chat)
     if tool_choice is not None:
         template_kwargs["tool_choice"] = tool_choice
     prompt = apply_chat_template(
@@ -412,6 +421,34 @@ def prompt_tokens(request: dict) -> int:
         model, prompt, sent, options = _render(request)
         sizes = [load_image(url).size for url in sent]
         return _count(model, prompt, sizes, options)
+
+
+@functools.cache
+def grid(model: str) -> int:
+    """The side, in pixels, of the cell the model's processor sizes every image in: it encodes an image at a multiple of this on each side (the judged processors' patch size times their merge size)."""
+    require_extra("mlx.core", "mlx_vlm")
+    with _serving(model):
+        processor, _ = _resources(model)
+        return (
+            processor.image_processor.patch_size * processor.image_processor.merge_size
+        )
+
+
+@functools.cache
+def processed_size(model: str, width: int, height: int) -> tuple[int, int]:
+    """The (width, height) the server's processor encodes an image of this size at, under the pixel limits a request is served with: the processor's own sizing (the judged processors' _resolved_size), as the server's preprocessing calls it."""
+    require_extra("mlx.core", "mlx_vlm")
+    with _serving(model):
+        _, _, _, options = _render(_one_image_request(model))
+        options = dict(options)
+        processor, _ = _resources(model)
+        sized_height, sized_width = processor.image_processor._resolved_size(
+            height,
+            width,
+            min_pixels=options.get("min_pixels"),
+            max_pixels=options.get("max_pixels"),
+        )
+        return sized_width, sized_height
 
 
 @functools.cache
