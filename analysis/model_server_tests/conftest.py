@@ -1,6 +1,6 @@
 """The suite that needs the running model server: the bundled mlx server at the card's endpoint.
 
-It runs only when this directory is named: `uv run pytest tests_model_server` from analysis/. Every test skips with a reason when mlx cannot run on the machine (it needs Apple silicon under macOS) or when the server is not up. The platform is checked first, because on any other machine the server's boot command cannot work. A machine without the mlx extra, or without the memory the model needs, cannot boot the server, so the server check covers both cases.
+It runs only when this directory is named: `uv run pytest model_server_tests` from analysis/. Every test skips with a reason when mlx cannot run on the machine (it needs Apple silicon under macOS) or when the server is not up.
 """
 
 import platform

@@ -3,7 +3,8 @@
 	"private": true,
 	"scripts": {
 		"lint": "./node_modules/.bin/biome lint . && uv run python -m ruff check",
-		"format": "./node_modules/.bin/biome format --write . && uv run python -m ruff format"
+		"format": "./node_modules/.bin/biome format --write . && uv run python -m ruff format",
+		"test": "bun install --frozen-lockfile --cwd recorder && bun install --frozen-lockfile --cwd store && bun install --frozen-lockfile --cwd evidence/distill && { uv run pytest; py=$?; bun test --parallel ./recorder ./store ./evidence; js=$?; [ $py -eq 0 ] && [ $js -eq 0 ]; }"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.15"

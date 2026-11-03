@@ -7,7 +7,8 @@
 		"build": "bun build src/global.js --outfile dist/locus-recorder.min.js --minify --format=iife",
 		"build:lib": "bun build src/index.js --outfile dist/locus-recorder.lib.js --format=esm",
 		"lint": "bun run --cwd .. lint",
-		"format": "bun run --cwd .. format"
+		"format": "bun run --cwd .. format",
+		"test": "bun run --cwd .. test"
 	},
 	"dependencies": {
 		"@fingerprintjs/botd": "2.0.0",

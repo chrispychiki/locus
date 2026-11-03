@@ -43,9 +43,3 @@ exclude = ["distill/node_modules", "distill/package.json",
 "src/locus" = "locus"
 "distill" = "locus/evidence/distill"
 "vendor" = "locus/evidence/vendor"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-# Tests are tmp_path-isolated (own dbs, ephemeral ports, per-home sockets), so they parallelize
-# across all cores; worksteal keeps the browser-heavy long tail from serializing at the end.
-addopts = ["-n", "auto", "--dist", "worksteal"]

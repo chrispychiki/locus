@@ -1,6 +1,6 @@
 """The server's own count run in this process (mlx/count.py): mlx-vlm's chat steps over the model's processor and config, with neither the server nor the weights.
 
-The image pins were measured on the live server, each the prompt_tokens one image of that size added to a request, markers included; tests_model_server/test_integration.py proves whole requests against the live server. The count is upstream's own code, so a failing pin means upstream's arithmetic moved under the card: re-measure on the server before re-pinning.
+The image pins were measured on the live server, each the prompt_tokens one image of that size added to a request, markers included; model_server_tests/test_integration.py proves whole requests against the live server. The count is upstream's own code, so a failing pin means upstream's arithmetic moved under the card: re-measure on the server before re-pinning.
 """
 
 import pytest

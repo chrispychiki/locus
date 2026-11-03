@@ -53,7 +53,7 @@ The same rule holds for what the projection knows about HTML: which elements a b
 | `distill/` | the bun-side distillation machinery — internal: `locus load` derives with it, `locus doctor` repairs through it |
 | `vendor/` | pinned rrweb replay assets + provenance (`vendor/README.md`) |
 | `tests/` | the hermetic suite, by kind in `unit/`, `integration/` and `functional/` — `uv run pytest`, and `bun test tests/` for the distillation's JS side |
-| `tests_live/` | the live capture→store→replay chain against the deployed worker + R2 — `uv run pytest tests_live`, on a configured deployment |
+| `live_tests/` | the live capture→store→replay chain against the deployed worker + R2 — `uv run pytest live_tests`, on a configured deployment |
 
 ## Conventions
 

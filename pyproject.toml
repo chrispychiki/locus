@@ -11,15 +11,19 @@ package = false
 # 48h supply-chain cooldown, for every resolution this workspace does.
 exclude-newer = "48 hours"
 
-# A bare `pytest` at the workspace root runs the packages' hermetic suites and nothing else —
-# without this, rootdir discovery would also collect evidence/tests_live, which uploads to the
-# real R2 bucket, and analysis/tests_model_server, which needs the running model server. Each
-# runs only by explicit address: `uv run pytest tests_live` from evidence/, `uv run pytest
-# tests_model_server` from analysis/.
+# The repo's only pytest config, so every run's rootdir is the repo root.
 [tool.pytest.ini_options]
-# The workspace-root run's cache lands in the deployment's accreted data
-# directory (a per-package run keeps its package-local cache: cache_dir is
-# rootdir-relative, and each package is its own rootdir).
+# The deployment's accreted data directory.
 cache_dir = "data/cache/pytest"
 testpaths = ["evidence/tests", "analysis/tests", "recorder/tests"]
+# pytest's own defaults, plus the `*_tests` suites, which need a live service and run only when
+# named: evidence/live_tests uploads to the real R2 bucket, analysis/model_server_tests needs the
+# running model server. Their names must not begin with "test", because pytest loads the conftest
+# of every test* subdirectory of the directory a run starts from.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "*_tests"]
+# Tests are tmp_path-isolated (own dbs, ephemeral ports, per-home sockets), so they parallelize
+# across all cores; worksteal keeps the browser-heavy long tail from serializing at the end.
 addopts = ["-n", "auto", "--dist", "worksteal"]
+filterwarnings = [
+    "ignore:builtin type (Swig|swig).* has no __module__ attribute:DeprecationWarning",
+]

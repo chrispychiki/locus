@@ -1,6 +1,6 @@
 """Analysis pricing.
 
-The projection itself is covered by test_analyze.py. Pricing runs against an injected CostModel so every economic constant is the test's own; the composition underneath (compose_window, screenshot_moments, the walls) is real. The backends' own cost models run here on the offline count (_analysis_support.install_offline_count): the server's own count they call is proven against the live server in tests_model_server, so what is tested here is what each cost model hands it.
+The projection itself is covered by test_analyze.py. Pricing runs against an injected CostModel so every economic constant is the test's own; the composition underneath (compose_window, screenshot_moments, the walls) is real. The backends' own cost models run here on the offline count (_analysis_support.install_offline_count): the server's own count they call is proven against the live server in model_server_tests, so what is tested here is what each cost model hands it.
 """
 
 import itertools

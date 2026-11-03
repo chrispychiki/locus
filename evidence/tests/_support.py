@@ -1,4 +1,4 @@
-"""Shared test scaffolding: hand-built rrweb events, the store's chunk shape and an in-memory stand-in for it, real distilled dbs, a render stub, and the fixtures both suites run under. Real rendering is covered in test_render and the tests_live suite; here the browser is stubbed so the control flow itself is pinned.
+"""Shared test scaffolding: hand-built rrweb events, the store's chunk shape and an in-memory stand-in for it, real distilled dbs, a render stub, and the fixtures both suites run under. Real rendering is covered in test_render and the live_tests suite; here the browser is stubbed so the control flow itself is pinned.
 
 Both packages' suites import from here: the analysis suite puts this directory on its import path (analysis/tests/conftest.py) so the fixtures and builders have exactly one home.
 """
@@ -44,10 +44,19 @@ DAY_MS = 86_400_000
 
 
 def bun_install(package):
-    """Install a bun package's modules if they aren't there — a clone carries the lockfiles, not the modules, so a suite installs what it is about to run rather than erroring on a fresh clone."""
+    """Install a bun package's modules as its lockfile names them, on every run: a clone carries only the lockfiles, and a lockfile bump changes the modules. When they're current this takes milliseconds."""
     require_bun()
-    if not (package / "node_modules").is_dir():
-        subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=package, check=True)
+    run = subprocess.run(
+        ["bun", "install", "--frozen-lockfile"],
+        cwd=package,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if run.returncode != 0:
+        raise RuntimeError(
+            f"bun install --frozen-lockfile failed in {package}:\n{run.stdout}{run.stderr}"
+        )
 
 
 def build_recorder(*scripts):

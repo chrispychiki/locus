@@ -1,20 +1,17 @@
 """Conftest for the live suite — the one that means the real deployment.
 
-Collected only when this directory is named on the command line (`pytest tests_live`);
-the hermetic suite's `testpaths = ["tests"]` never picks it up. Missing Cloudflare
+Collected only when this directory is named on the command line (`pytest live_tests`). Missing Cloudflare
 credentials or a bucket declaration is a loud error naming the setup, never a skip:
 anyone who invoked this suite asked for the live check.
 """
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import tomllib
 from locus.evidence.deployment import env_from_files
-from locus.evidence.slices import require_bun
 
 EVIDENCE = Path(__file__).resolve().parents[1]
 DEPLOYMENT = EVIDENCE.parent
@@ -22,6 +19,8 @@ RECORDER = DEPLOYMENT / "recorder"
 # The shared browser helpers live in tests/; putting that directory on the
 # import path lets live tests `from _harness import ...` the same way.
 sys.path.insert(0, str(EVIDENCE / "tests"))
+
+from _support import build_recorder
 
 
 def _require_configured() -> None:
@@ -62,14 +61,7 @@ def pytest_configure(config):
     if hasattr(config, "workerinput"):
         return
     _require_configured()
-    require_bun()
-    if not (RECORDER / "node_modules").is_dir():
-        subprocess.run(
-            ["bun", "install", "--frozen-lockfile"], cwd=RECORDER, check=True
-        )
-    subprocess.run(
-        ["bun", "run", "build:lib"], cwd=RECORDER, check=True, capture_output=True
-    )
+    build_recorder("build:lib")
 
 
 @pytest.fixture(scope="session")

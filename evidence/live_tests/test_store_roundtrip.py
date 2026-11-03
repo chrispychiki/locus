@@ -21,8 +21,8 @@ from pathlib import Path
 
 from _harness import chromium_page, serve_dir
 from locus.evidence.db import connect
+from locus.evidence.deployment import definitions, worker_url
 from locus.evidence.deployment import store as deployment_store
-from locus.evidence.deployment import worker_url
 from locus.evidence.derive import finish_derivations
 from locus.evidence.load import load_chunks
 from locus.evidence.render import RenderSession
@@ -151,7 +151,7 @@ def test_store_roundtrip(tmp_path, recorder_dist):
         assert loaded["inserted"], (
             "chunks were listed but the load landed no events — the store→db read path is broken"
         )
-        finish_derivations(conn, str(db))
+        finish_derivations(conn, str(db), definitions())
 
         slices = conn.execute(
             "SELECT id, start_ts, end_ts FROM slices WHERE status='replayable' ORDER BY start_ts"
@@ -172,7 +172,12 @@ def test_store_roundtrip(tmp_path, recorder_dist):
             tmp_path / "screenshots",
         ) as session:
             for name, ts in moments.items():
-                screenshot = session.capture(labels[homes[name]], ts)
+                screenshot = session.capture(
+                    labels[homes[name]],
+                    ts,
+                    kind="activity",
+                    size=lambda width, height: (width, height),
+                )
                 assert "failedImages" not in screenshot.faults, name
     finally:
         _delete(store, store.keys(prefix=prefix))

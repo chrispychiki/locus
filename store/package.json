@@ -11,7 +11,7 @@
 		"doctor": "bun run scripts/doctor.js",
 		"lint": "bun run --cwd .. lint",
 		"format": "bun run --cwd .. format",
-		"test": "bun test"
+		"test": "bun run --cwd .. test"
 	},
 	"devDependencies": {
 		"fflate": "^0.8.3",

@@ -104,7 +104,7 @@ def offline_processed_size(model, width, height):
 
 
 def install_offline_count(monkeypatch):
-    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in tests_model_server; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at, sized on an OFFLINE_GRID-pixel grid — so a suite's expected counts are its own arithmetic."""
+    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in model_server_tests; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at, sized on an OFFLINE_GRID-pixel grid — so a suite's expected counts are its own arithmetic."""
     import json
 
     from locus.analysis.mlx import count

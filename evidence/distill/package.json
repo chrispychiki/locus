@@ -4,7 +4,8 @@
 	"private": true,
 	"scripts": {
 		"lint": "bun run --cwd ../.. lint",
-		"format": "bun run --cwd ../.. format"
+		"format": "bun run --cwd ../.. format",
+		"test": "bun run --cwd ../.. test"
 	},
 	"dependencies": {
 		"@rrweb/types": "2.1.7",

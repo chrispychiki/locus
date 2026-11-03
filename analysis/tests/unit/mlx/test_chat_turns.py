@@ -1,6 +1,6 @@
 """The chat-turns patch (mlx/chat_turns.py) over the model's real processor and template, with neither the server nor the weights: a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the rendering, the count reads them as the server will, and drift in any source the patch rests on refuses before anything is swapped.
 
-The count runs the patched functions in this process (count.py), so its rendering is the server's; tests_model_server/test_integration.py proves the handler's half against the live server.
+The count runs the patched functions in this process (count.py), so its rendering is the server's; model_server_tests/test_integration.py proves the handler's half against the live server.
 """
 
 import pytest
