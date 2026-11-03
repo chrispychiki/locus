@@ -3,6 +3,7 @@ from pathlib import Path
 from _support import (
     bun_install,
     contained,  # noqa: F401 — autouse fixture, registered by import
+    corpus,  # noqa: F401
 )
 
 EVIDENCE = Path(__file__).resolve().parents[1]

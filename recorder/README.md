@@ -23,10 +23,11 @@ On a site with a Content-Security-Policy, allowlist the store origin in `connect
 ```sh
 bun install
 bun run build   # → dist/locus-recorder.min.js — the bundle the store's deploy builds and serves
-bun test --parallel   # the suite; the flag fans test files out across cores
+bun test --parallel   # the unit suite, tests/unit/; the flag fans test files out across cores
+uv run pytest tests   # the browser suites: tests/integration/ and tests/functional/
 ```
 
-`bun test` includes the cross-package contract suites, which shell into the evidence package — so they additionally need `uv`, a synced workspace, and Playwright's Chromium (`analysis/README.md` § Install). A failure there naming a missing command or package is workspace setup, not a broken recorder.
+The browser suites run the built bundle in Chromium. `tests/integration/` records a real page and feeds the capture back through evidence and analysis; `tests/functional/` loads the script tag the way a site installs it. They need `uv`, a synced workspace, and Playwright's Chromium (`analysis/README.md` § Install). A failure there naming a missing command or package is workspace setup, not a broken recorder.
 
 ## What this adds over rrweb
 

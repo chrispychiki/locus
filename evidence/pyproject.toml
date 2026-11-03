@@ -35,7 +35,7 @@ build-backend = "hatchling.build"
 # npm packages.
 [tool.hatch.build.targets.wheel]
 only-include = ["src/locus", "distill", "vendor"]
-exclude = ["distill/node_modules", "distill/*.test.js", "distill/package.json",
+exclude = ["distill/node_modules", "distill/package.json",
            "distill/bun.lock", "distill/bunfig.toml",
            "distill/extract_rrweb_constants.js"]
 

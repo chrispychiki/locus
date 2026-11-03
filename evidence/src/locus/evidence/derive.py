@@ -37,11 +37,7 @@ def _stage_sources() -> dict[str, list[Path]]:
     return {
         "timestamps": [here / "hydrate.py"],
         "slices": [here / "slices.py"],
-        "distill": [
-            path
-            for path in sorted(script("distill.js").parent.glob("*.js"))
-            if not path.name.endswith(".test.js")
-        ],
+        "distill": sorted(script("distill.js").parent.glob("*.js")),
         "sessions": [here / "sessions.py", here / "user_activity.py"],
     }
 
@@ -65,7 +61,7 @@ def _digest(paths: list[Path]) -> str:
 
 
 def stage_vintages(definition: dict) -> dict[str, str]:
-    """Each stage's identity: a hash over its own sources — hydrate.py for the canonical timestamp, slices.py for slice grouping and rescue eligibility, every non-test source in the distill package for flattening, projection, and the rescue gate, sessions.py and user_activity.py for the session derivation — so a stage's vintage moves exactly when its deriving logic does, and a new distillation module counts without registration. The sessions stage's identity also carries the operator's declared numbers, so a definition edit moves it the same way a code change does."""
+    """Each stage's identity: a hash over its own sources — hydrate.py for the canonical timestamp, slices.py for slice grouping and rescue eligibility, every source in the distill package for flattening, projection, and the rescue gate, sessions.py and user_activity.py for the session derivation — so a stage's vintage moves exactly when its deriving logic does, and a new distillation module counts without registration. The sessions stage's identity also carries the operator's declared numbers, so a definition edit moves it the same way a code change does."""
     vintages = {stage: _digest(paths) for stage, paths in _stage_sources().items()}
     if "sessions" in vintages:
         vintages["sessions"] = _digest_strings(

@@ -20,7 +20,11 @@ from locus.evidence.rrweb_constants import (
     MouseInteractions,
     NodeType,
 )
-from locus.evidence.slices import materialize_slices, require_bun
+from locus.evidence.slices import (
+    materialize_slices,
+    require_bun,
+    rescue_orphan_slices,
+)
 from locus.evidence.store import S3Store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "demo_recording.json"
@@ -28,7 +32,15 @@ DISTILL = Path(__file__).parent.parent / "distill" / "distill.js"
 
 URL = "https://x.test/page"
 REPO = Path(__file__).resolve().parents[2]
+EVIDENCE = REPO / "evidence"
 RECORDER = REPO / "recorder"
+
+DEFINITION = {
+    "session": {"inactivity_minutes": 30},
+    "engaged": {"min_seconds": 10, "min_pageviews": 2},
+}
+MIN = 60_000
+DAY_MS = 86_400_000
 
 
 def bun_install(package):
@@ -133,6 +145,18 @@ def identify(ts, user_id):
     return {"type": EventType.Identify, "timestamp": ts, "data": {"userId": user_id}}
 
 
+def sized_meta(ts, width=1280, height=800):
+    return {
+        "type": EventType.Meta,
+        "timestamp": ts,
+        "data": {"href": "https://x.test/", "width": width, "height": height},
+    }
+
+
+def dom_content_loaded(ts):
+    return {"type": EventType.DomContentLoaded, "timestamp": ts, "data": {}}
+
+
 def env(event, recorder_slice):
     return {**event, "_envelope": {"recorder_slice": recorder_slice}}
 
@@ -167,6 +191,42 @@ def counted(event: dict, seq: int) -> dict:
     return {**event, "counter": f"{event['timestamp']}{seq:06d}"}
 
 
+def synthetic(conn, events, visitor="v1"):
+    hydrate(conn, visitor, stamped(events))
+    return conn
+
+
+def hydrate_into(conn, visitor_id, events):
+    hydrate(conn, visitor_id, events)
+    materialize_slices(conn, visitor_id)
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    visitor_id, events = read_recording(FIXTURE)
+    conn = connect(tmp_path / "events.db")
+    hydrate_into(conn, visitor_id, events)
+    return conn
+
+
+def replayable_slices(tmp_path):
+    visitor_id, events = read_recording(FIXTURE)
+    conn = connect(tmp_path / "events.db")
+    hydrate(conn, visitor_id, events)
+    materialize_slices(conn, visitor_id)
+    return conn
+
+
+def rescue_run(tmp_path, orphan_events):
+    db_path = tmp_path / "events.db"
+    conn = connect(db_path)
+    events = [meta(1000), full_snapshot(1001), click(2000, 3)] + orphan_events
+    hydrate(conn, "v1", stamped(events))
+    materialize_slices(conn, "v1")
+    summary = rescue_orphan_slices(conn, str(db_path))
+    return conn, summary
+
+
 def chunk_blob(
     slice_id, events, user_agent=UA_DESKTOP, errors=(), visitor=VISITOR, envelope=None
 ) -> bytes:
@@ -199,6 +259,21 @@ def chunk_at(visitor, ms, snippet=SNIPPET, events=None):
         (f"{snippet}/{slice_date(slice_id)}/{visitor}/{slice_id}/{ms}000001.json.gz"),
         chunk_blob(slice_id, events, visitor=visitor),
     )
+
+
+def recording(ms: int, snippet: str = "snip01", visitor: str = VISITOR):
+    """One page context's chunk, placed where the store's key layout puts it — the whole intake path a recording of that moment reaches the db through."""
+    from locus.evidence.chunk import slice_date
+
+    rid = f"{ms:014d}-aaaa"
+    stream = [
+        counted(event, seq)
+        for seq, event in enumerate(
+            [meta(ms), full_snapshot(ms + 1), click(ms + 15_000, 3)], start=1
+        )
+    ]
+    key = f"{snippet}/{slice_date(rid)}/{visitor}/{rid}/{ms}000001.json.gz"
+    return key, chunk_blob(rid, stream, visitor=visitor, errors=["a send failed"])
 
 
 class FakeStore:

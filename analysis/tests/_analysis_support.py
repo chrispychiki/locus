@@ -104,7 +104,7 @@ def offline_processed_size(model, width, height):
 
 
 def install_offline_count(monkeypatch):
-    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in the mlx suites; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at, sized on an OFFLINE_GRID-pixel grid — so a suite's expected counts are its own arithmetic."""
+    """Count requests without mlx or a model's files. What ships is the server's own count (mlx/count.py), proven against the live server in tests_model_server; here a request costs one token per word of its text, its tool declarations included, plus offline_image_tokens for each image at the size it is sent at, sized on an OFFLINE_GRID-pixel grid — so a suite's expected counts are its own arithmetic."""
     import json
 
     from locus.analysis.mlx import count
@@ -220,6 +220,70 @@ def horizon_at(root: Path) -> None:
     reach = (datetime.now(timezone.utc).date() - recorded).days + 1
     (root / "store").mkdir(exist_ok=True)
     (root / CONFIG_FILE).write_text(f"retention_days = {reach}\n")
+
+
+def row(ts, kind, **kw):
+    from locus.evidence.hydrate import pack_raw
+
+    base = {
+        "id": ts,
+        "timestamp": ts,
+        "type_str": kind,
+        "url": None,
+        "tag": None,
+        "class": None,
+        "text": None,
+        "x": None,
+        "y": None,
+        "input": None,
+        "hidden": None,
+        "extra": None,
+        "md": None,
+        "diff": None,
+        "raw_json": pack_raw("{}"),
+        "user_id": None,
+        "device": None,
+        "os": None,
+        "browser": None,
+    }
+    base.update(kw)
+    return base
+
+
+def paid_conversation(tmp_path, replies, wire_log=None):
+    from types import SimpleNamespace
+
+    from locus.analysis.model.gemini import GeminiConversation
+
+    conversation = GeminiConversation(
+        GEMINI,
+        "sys",
+        cache_path=tmp_path / "cache.db",
+        record_dir=tmp_path / "payloads",
+    )
+
+    def create(**kwargs):
+        if wire_log is not None:
+            wire_log.append(kwargs)
+        return replies.pop(0)
+
+    conversation.client = SimpleNamespace(interactions=SimpleNamespace(create=create))
+    return conversation
+
+
+@pytest.fixture(autouse=True)
+def gemini_key(monkeypatch):
+    """The Gemini fakes never reach the wire, but the SDK client refuses to construct keyless."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-used")
+
+
+@pytest.fixture(autouse=True)
+def shipped_card_roster(monkeypatch):
+    """Tests chdir off the clone freely, and the card declarations resolve from the deployment root at cwd — pin them to the repo's shipped ones so a moved cwd never strands a card lookup.
+    A test of the declarations themselves overrides with its own roster (card_roster)."""
+    from locus.analysis.model import cards
+
+    monkeypatch.setattr(cards, "cards_dir", lambda: REPO / "config" / "cards")
 
 
 @pytest.fixture(autouse=True)

@@ -64,9 +64,6 @@ testpaths = ["tests"]
 # Tests are tmp_path-isolated (own dbs, ephemeral ports, per-home sockets), so they parallelize
 # across all cores; worksteal keeps the browser-heavy long tail from serializing at the end.
 addopts = ["-n", "auto", "--dist", "worksteal"]
-markers = [
-    "needs_mlx: requires the bundled mlx server running (free local model)",
-]
 filterwarnings = [
     "ignore:builtin type (Swig|swig).* has no __module__ attribute:DeprecationWarning",
 ]

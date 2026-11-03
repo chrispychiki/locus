@@ -41,7 +41,7 @@ Every mount plays on the recording's absolute epoch-ms clock — the clock answe
 
 ## rrweb constants are generated, never typed
 
-Every numeric↔name mapping in the rrweb schema — event types, incremental sources, mouse-interaction subtypes, node types — comes from `distill/extract_rrweb_constants.js`, which reads the pinned `@rrweb/types` and emits the constants each language imports. A bare rrweb numeric literal anywhere in the repo is a defect even when it happens to be correct; `tests/test_canonical_constants.py` sweeps for the shapes that mistake takes and re-runs the generator to prove the checked-in files are what it emits. Regenerate after any rrweb upgrade. Locus's own event types are declared in the generator too, and nowhere else.
+Every numeric↔name mapping in the rrweb schema — event types, incremental sources, mouse-interaction subtypes, node types — comes from `distill/extract_rrweb_constants.js`, which reads the pinned `@rrweb/types` and emits the constants each language imports. A bare rrweb numeric literal anywhere in the repo is a defect even when it happens to be correct; `tests/unit/test_canonical_constants.py` sweeps for the shapes that mistake takes, and `tests/integration/test_constants_generator.py` re-runs the generator to prove the checked-in files are what it emits. Regenerate after any rrweb upgrade. Locus's own event types are declared in the generator too, and nowhere else.
 
 The same rule holds for what the projection knows about HTML: which elements a browser lays out on their own line or does not render, what inline markup means to the eye, which attributes are ARIA states and which native attributes map onto them. `distill/extract_html_semantics.js` reads those from the WHATWG rendering section, the WAI-ARIA specification, and HTML-AAM and emits `distill/html_semantics.js`, stamped with each source's publication date; `distill/ua_style.js` applies the user-agent stylesheet from it. A hand-typed list of block elements or state attributes anywhere is the same defect. Regenerate deliberately, when a spec revision matters.
 
@@ -52,7 +52,7 @@ The same rule holds for what the projection knows about HTML: which elements a b
 | `src/locus/evidence/` | the tools (the package docstring carries the data-flow spine) |
 | `distill/` | the bun-side distillation machinery — internal: `locus load` derives with it, `locus doctor` repairs through it |
 | `vendor/` | pinned rrweb replay assets + provenance (`vendor/README.md`) |
-| `tests/` | the hermetic suite — `uv run pytest`, and `bun test distill/` for the JS side |
+| `tests/` | the hermetic suite, by kind in `unit/`, `integration/` and `functional/` — `uv run pytest`, and `bun test tests/` for the distillation's JS side |
 | `tests_live/` | the live capture→store→replay chain against the deployed worker + R2 — `uv run pytest tests_live`, on a configured deployment |
 
 ## Conventions

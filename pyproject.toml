@@ -11,10 +11,11 @@ package = false
 # 48h supply-chain cooldown, for every resolution this workspace does.
 exclude-newer = "48 hours"
 
-# A bare `pytest` at the workspace root runs both packages' hermetic suites and nothing else —
+# A bare `pytest` at the workspace root runs the packages' hermetic suites and nothing else —
 # without this, rootdir discovery would also collect evidence/tests_live, which uploads to the
-# real R2 bucket. The live suite runs only by explicit address: `uv run pytest tests_live`
-# from evidence/.
+# real R2 bucket, and analysis/tests_model_server, which needs the running model server. Each
+# runs only by explicit address: `uv run pytest tests_live` from evidence/, `uv run pytest
+# tests_model_server` from analysis/.
 [tool.pytest.ini_options]
 # The workspace-root run's cache lands in the deployment's accreted data
 # directory (a per-package run keeps its package-local cache: cache_dir is
@@ -22,8 +23,3 @@ exclude-newer = "48 hours"
 cache_dir = "data/cache/pytest"
 testpaths = ["evidence/tests", "analysis/tests", "recorder/tests"]
 addopts = ["-n", "auto", "--dist", "worksteal"]
-# pytest reads ini options from a single rootdir, so a root run cannot see analysis/pyproject's
-# marker registration; the analysis suite's markers are re-registered here.
-markers = [
-    "needs_mlx: requires the bundled mlx server running (free local model)",
-]
