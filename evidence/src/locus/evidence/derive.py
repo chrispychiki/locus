@@ -2,16 +2,18 @@
 
 Three planes of fact live in the db, and only one is this module's:
 - **Identity** — raw_json and content_hash. raw_json is the source of truth; content_hash is the dedup identity every load leans on. Their canonical form is frozen (hydrate.py): a change there is not staleness this module can heal — it breaks dedup identity, and the fix is a rebuild, never a re-derive.
-- **Derivations** — everything recomputable from raw_json: the canonical timestamp, the slice assignment and slices table, rescue verdicts, the flat columns and projections, the sessions table and the session stamp. This module owns their currency — a vintage per stage of the deriving code, and one heal that re-runs the path from the first stage whose code changed.
+- **Derivations** — everything recomputable from raw_json: the canonical timestamp, the slice assignment and slices table, rescue verdicts, the flat columns and projections, the sessions table and the session stamp. This module owns their currency — the identity of what derives them, and one heal that re-runs the path from where that identity changed.
 - **Testimony** — the envelope columns and load-time facts (device/os/browser through snippet, uploaded_ms, chunk_errors), captured at load from sources not retained — the userAgent, the object key, the store's LIST — so they are recorded once and never re-derived.
 
 Two verbs drive the one derivation path here: `load` after it hydrates, and `doctor` as the heal for derivations left behind — a load that died partway, or deriving code that changed under the db.
 
-The derivation pass stamps its own vintage: derived values drift silently from the logic that derives them, so a pass that leaves every derived value current records the deriving code's content-hash identity in db meta, and staleness is the recorded identity differing from the installed one.
-The path is four stages, each deriving from the one before — timestamps from raw_json, slices from the timestamped stream, distillation from the sliced stream, sessions from the distilled columns — so the identity is kept per stage, and a change is healed from the stage it touched: a change to the session definition re-derives sessions alone, while a change to the canonical timestamp re-derives everything downstream of it.
-The sessions stage derives from a declaration as well as from code — the operator's numbers in config/definitions.toml — so its identity carries the declared values too, and an edit there is staleness like any other.
+The derivation pass stamps its own vintage: derived values drift silently from the logic that derives them, so a pass that leaves every derived value current records in db meta the identity it ran under, and staleness is the recorded identity differing from the installed one.
+The path is four stages, each deriving from the one before — timestamps from raw_json, slices from the timestamped stream, distillation from the sliced stream, sessions from the distilled columns — and the identity has two parts:
+- **The code's** — every Python and JavaScript file of the evidence package and the distiller, Python as its syntax tree without docstrings and JavaScript as Bun's transpiler prints it, so a comment or a reformat moves nothing; and, by installed version, the npm packages distillation imports (DISTILLATION_PACKAGES), whose code shapes derived rows like ours. A change to it re-derives the whole path. It is counted whole because a narrower count needs the list of files each stage runs, which only a hand-kept list or an import tracer could give, and either can miss code a stage runs; counting too much costs only a re-derive.
+- **The definition's** — the operator's numbers in config/definitions.toml, which only the sessions stage reads, so a change to them re-derives sessions alone.
 """
 
+import ast
 import fcntl
 import hashlib
 import json
@@ -27,19 +29,9 @@ from .assets import script
 from .speak import beating
 from .user_activity import user_activity_clause
 
-# The derivation path in order, each stage named with the sources whose change re-derives it —
-# and, because each stage reads the one before, everything after it.
-STAGES = ("timestamps", "slices", "distill", "sessions")
 
-
-def _stage_sources() -> dict[str, list[Path]]:
-    here = Path(__file__).parent
-    return {
-        "timestamps": [here / "hydrate.py"],
-        "slices": [here / "slices.py"],
-        "distill": sorted(script("distill.js").parent.glob("*.js")),
-        "sessions": [here / "sessions.py", here / "user_activity.py"],
-    }
+class VintageUnreadable(Exception):
+    """The installed identity cannot be read — no bun, a file that does not parse, a dependency that is not installed — so whether the derived surfaces are current cannot be told."""
 
 
 def _declared(definition: dict) -> str:
@@ -50,30 +42,86 @@ def _declared(definition: dict) -> str:
     )
 
 
-def _digest(paths: list[Path]) -> str:
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(path.name.encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+# The npm packages distillation imports. Their code shapes derived rows like ours, so each counts
+# by its installed version; a package distillation comes to import belongs here.
+DISTILLATION_PACKAGES = ("aria-query",)
 
 
-def stage_vintages(definition: dict) -> dict[str, str]:
-    """Each stage's identity: a hash over its own sources — hydrate.py for the canonical timestamp, slices.py for slice grouping and rescue eligibility, every source in the distill package for flattening, projection, and the rescue gate, sessions.py and user_activity.py for the session derivation — so a stage's vintage moves exactly when its deriving logic does, and a new distillation module counts without registration. The sessions stage's identity also carries the operator's declared numbers, so a definition edit moves it the same way a code change does."""
-    vintages = {stage: _digest(paths) for stage, paths in _stage_sources().items()}
-    if "sessions" in vintages:
-        vintages["sessions"] = _digest_strings(
-            [vintages["sessions"], _declared(definition)]
+def _code_roots() -> tuple[Path, Path]:
+    """The evidence package and the distiller."""
+    return Path(__file__).parent, script("distill.js").parent
+
+
+def _code_files() -> dict[str, Path]:
+    """Every Python and JavaScript file of the evidence package and the distiller, keyed by its path within them. Installed packages, bytecode caches, dotfiles and editor leftovers are not ours."""
+    files = {}
+    for root in _code_roots():
+        for path in sorted(root.rglob("*")):
+            within = path.relative_to(root)
+            if (
+                path.suffix in (".py", ".js")
+                and path.is_file()
+                and not any(
+                    part in ("node_modules", "__pycache__")
+                    or part.startswith((".", "#"))
+                    for part in within.parts
+                )
+            ):
+                files[f"{root.name}/{within}"] = path
+    return files
+
+
+def _python_code(path: Path) -> str:
+    """A Python file's syntax tree, docstrings removed."""
+    tree = ast.parse(path.read_bytes(), filename=str(path))
+    for node in ast.walk(tree):
+        if (
+            isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            )
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            node.body = node.body[1:] or [ast.Pass()]
+    return ast.dump(tree)
+
+
+def _javascript_code(paths: list[Path]) -> dict[str, str]:
+    """JavaScript files as Bun's transpiler prints them (identity.js), by path."""
+    run = subprocess.run(
+        ["bun", str(script("identity.js")), *map(str, paths)],
+        capture_output=True,
+        check=False,
+    )
+    if run.returncode != 0:
+        raise VintageUnreadable(
+            "reading the derivation's JavaScript failed: "
+            + run.stderr.decode("utf-8", "replace").strip()
         )
-    return vintages
+    return json.loads(run.stdout)
 
 
-def derivation_vintage(definition: dict) -> str:
-    """The whole path's identity — the stage vintages in path order, as one digest."""
-    vintages = stage_vintages(definition)
-    return _digest_strings(vintages[stage] for stage in STAGES if stage in vintages)
+def _npm_packages() -> dict[str, str]:
+    """DISTILLATION_PACKAGES, each by the version installed where distillation resolves it."""
+    distill = _code_roots()[1]
+    versions = {}
+    for name in DISTILLATION_PACKAGES:
+        manifest = distill / "node_modules" / name / "package.json"
+        if not manifest.is_file():
+            raise VintageUnreadable(
+                f"{name}, which distillation imports, is not installed in {distill} "
+                "— run install.sh"
+            )
+        try:
+            versions[f"npm:{name}"] = json.loads(manifest.read_text())["version"]
+        except (ValueError, KeyError) as error:
+            raise VintageUnreadable(
+                f"{manifest} states no version ({type(error).__name__}: {error}) "
+                "— run install.sh"
+            ) from error
+    return versions
 
 
 def _digest_strings(parts) -> str:
@@ -84,49 +132,98 @@ def _digest_strings(parts) -> str:
     return digest.hexdigest()
 
 
-def stamped_vintage(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute(
-        "SELECT value FROM meta WHERE key = 'derivation_vintage'"
-    ).fetchone()
-    return row["value"] if row else None
+def _code_vintage() -> str:
+    try:
+        files = _code_files()
+        javascript = _javascript_code(
+            [path for path in files.values() if path.suffix == ".js"]
+        )
+        code = _npm_packages()
+        for key, path in files.items():
+            if path.suffix == ".py":
+                code[key] = _python_code(path)
+            else:
+                code[key] = javascript[str(path)]
+    except VintageUnreadable:
+        raise
+    except SyntaxError as error:
+        raise VintageUnreadable(
+            f"the derivation's code does not parse: {error}"
+        ) from error
+    except Exception as error:
+        raise VintageUnreadable(
+            f"the derivation's code cannot be read: {type(error).__name__}: {error}"
+        ) from error
+    return _digest_strings(part for key in sorted(code) for part in (key, code[key]))
+
+
+def _read_code_vintage() -> str | VintageUnreadable:
+    try:
+        return _code_vintage()
+    except VintageUnreadable as unreadable:
+        return unreadable
+
+
+# The code's identity, read once when this process loads the derivation code. Every pass in the
+# process stamps this one, so code edited after it reads as stale on the next run.
+_LOADED_CODE = _read_code_vintage()
+
+
+def installed_vintages(definition: dict) -> dict[str, str]:
+    """The installed identity's two parts: the code's as this process loaded it, and the definition's (see the module docstring). Exits when the code's could not be read: with require_bun's message when bun is missing, else with the reason."""
+    if isinstance(_LOADED_CODE, VintageUnreadable):
+        from .slices import require_bun
+
+        require_bun()
+        raise SystemExit(str(_LOADED_CODE))
+    return {
+        "code": _LOADED_CODE,
+        "definition": _digest_strings([_declared(definition)]),
+    }
+
+
+def stamped_vintages(conn: sqlite3.Connection) -> dict[str, str]:
+    """The identity the db's values were derived under, by part — every `vintage_` row in meta, empty for a db never stamped."""
+    return {
+        row["key"].removeprefix("vintage_"): row["value"]
+        for row in conn.execute(
+            "SELECT key, value FROM meta WHERE key GLOB 'vintage_*'"
+        )
+    }
+
+
+def _distilled(conn: sqlite3.Connection) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM events WHERE type_str IS NOT NULL LIMIT 1"
+        ).fetchone()
+    )
 
 
 def derivations_stale(conn: sqlite3.Connection, definition: dict) -> bool:
-    """Whether the derived surfaces were derived by code — or a declaration — that has since changed. Derived values drift silently from the logic that derives them, so distilled rows whose recorded vintage differs from the installed identity — or that carry no recorded vintage at all — are stale. A db with no distilled rows is not stale, merely underived; the incremental gate owns that state."""
-    distilled = conn.execute(
-        "SELECT 1 FROM events WHERE type_str IS NOT NULL LIMIT 1"
-    ).fetchone()
-    return bool(distilled) and stamped_vintage(conn) != derivation_vintage(definition)
+    """Whether the derived surfaces were derived by code — or a declaration — that has since changed. Derived values drift silently from the logic that derives them, so distilled rows whose recorded vintage differs from the installed identity — or that carry no recorded vintage at all — are stale. A db with no distilled rows is not stale, merely underived; the incremental gate owns that state. Exits with the reason when the installed identity cannot be read."""
+    return stale_stage(conn, definition) is not None
 
 
 def stale_stage(conn: sqlite3.Connection, definition: dict) -> str | None:
-    """The first stage whose identity changed since the db's values were derived — where the heal starts, everything after it re-deriving too — or None when the path is current. A db stamped before the stages were recorded separately, or whose whole-path stamp disagrees with its stage stamps, is healed from the top: nothing narrower can claim currency."""
-    if not derivations_stale(conn, definition):
+    """The stage the heal starts at, everything after it re-deriving too, or None when the db is current: sessions when only the definition changed, timestamps — the whole path — otherwise. Exits with the reason when the installed identity cannot be read."""
+    return _stale_stage(conn, installed_vintages(definition))
+
+
+def _stale_stage(conn: sqlite3.Connection, vintages: dict[str, str]) -> str | None:
+    stamped = stamped_vintages(conn)
+    if not _distilled(conn) or stamped == vintages:
         return None
-    stamped = {
-        row["key"].removeprefix("vintage_"): row["value"]
-        for row in conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'vintage_%'"
-        )
-    }
-    installed = stage_vintages(definition)
-    for stage in STAGES:
-        if stage in installed and stamped.get(stage) != installed[stage]:
-            return stage
-    return STAGES[0]
+    only_definition = {**stamped, "definition": vintages["definition"]} == vintages
+    return "sessions" if only_definition else "timestamps"
 
 
-def _stamp_vintages(conn: sqlite3.Connection, definition: dict) -> None:
+def _stamp_vintages(conn: sqlite3.Connection, vintages: dict[str, str]) -> None:
+    """The stamp is the whole set of `vintage_` rows, replaced at once, so it holds exactly the parts installed_vintages names."""
+    conn.execute("DELETE FROM meta WHERE key GLOB 'vintage_*'")
     conn.executemany(
-        "INSERT INTO meta (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [
-            ("derivation_vintage", derivation_vintage(definition)),
-            *(
-                (f"vintage_{stage}", vintage)
-                for stage, vintage in stage_vintages(definition).items()
-            ),
-        ],
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        [(f"vintage_{part}", vintage) for part, vintage in vintages.items()],
     )
     conn.commit()
 
@@ -271,7 +368,7 @@ def derivation_lock(db: str):
 def finish_derivations(conn: sqlite3.Connection, db: str, definition: dict) -> dict:
     """Bring every derived surface current — the derivation half of a load, callable on its own — under the operator's session definition (deployment.definitions). Every pass says how far it has got as it goes, and only one runs per db at a time (derivation_lock).
 
-    A visitor with undistilled, unplaced, or unsessioned rows is one a load just changed or one a prior interrupted load left unfinished; either needs the downstream passes — slice, rescue, distill, sessions — and nothing else does. Detected from db state, never from what was just fetched, so it finishes stranded work no matter which caller reaches it. A dirty visitor's distilled columns are re-derived whole — distillation runs a visitor against its slices, so columns written against a missing placement are wrong, not merely incomplete — and its rows are marked undistilled first so the pass selects them by its own signal. An identity that changed since the db's values were derived would leave a mixed-vintage db if only the dirty visitors were touched, so staleness widens the pass to every visitor, from the stage whose identity changed through everything derived after it: a timestamp change re-derives timestamps, slices, rescue, distillation, and sessions; a slice change starts at slices; a distillation change re-distills and re-derives sessions; a session change — this code, the user-activity definition, or the operator's numbers — re-derives sessions alone. A pass that leaves every derived value current stamps the installed identity; a run that cannot make that claim leaves the old stamp so the staleness stays detectable. Returns what it found and did: the dirty visitors, the stage the staleness started at (None when current), and the rescue counts."""
+    A visitor with undistilled, unplaced, or unsessioned rows is one a load just changed or one a prior interrupted load left unfinished; either needs the downstream passes — slice, rescue, distill, sessions — and nothing else does. Detected from db state, never from what was just fetched, so it finishes stranded work no matter which caller reaches it. A dirty visitor's distilled columns are re-derived whole — distillation runs a visitor against its slices, so columns written against a missing placement are wrong, not merely incomplete — and its rows are marked undistilled first so the pass selects them by its own signal. An identity that changed since the db's values were derived would leave a mixed-vintage db if only the dirty visitors were touched, so staleness widens the pass to every visitor: a code change re-derives timestamps, slices, rescue, distillation, and sessions; a change to the operator's numbers re-derives sessions alone, along with the dirty visitors' own passes. A pass that leaves every derived value current stamps the identity as this process loaded it, so code edited after the command started leaves the db reading stale; a run that cannot make that claim leaves the old stamp so the staleness stays detectable. Returns what it found and did: the dirty visitors, the stage the staleness started at (None when current), and the rescue counts."""
     with derivation_lock(db):
         return _finish_derivations(conn, db, definition)
 
@@ -279,40 +376,39 @@ def finish_derivations(conn: sqlite3.Connection, db: str, definition: dict) -> d
 def _finish_derivations(conn: sqlite3.Connection, db: str, definition: dict) -> dict:
     from .slices import rescue_orphan_slices
 
+    vintages = installed_vintages(definition)
     dirty = dirty_visitors(conn)
-    stage = stale_stage(conn, definition)
+    stage = _stale_stage(conn, vintages)
     rescue: dict = {}
-    if dirty and stage is None:
+    if stage == "timestamps":
+        ranges_done = 0
+
+        def one_range() -> None:
+            nonlocal ranges_done
+            ranges_done += 1
+
+        with beating("re-deriving timestamps", lambda: f"{ranges_done} ranges"):
+            rederive_timestamps(conn, db, on_range=one_range)
+        _slice_every(conn, _every_visitor(conn))
+        with beating("rescuing orphan slices"):
+            rescue = rescue_orphan_slices(conn, db)
+        with beating("distilling"):
+            run_distill(db, full=True)
+    elif dirty:
         conn.executemany(
             "UPDATE events SET type_str = NULL WHERE visitor_id = ?",
             [(visitor_id,) for visitor_id in dirty],
         )
         conn.commit()
-    if stage is not None:
-        if stage == "timestamps":
-            ranges_done = 0
-
-            def one_range() -> None:
-                nonlocal ranges_done
-                ranges_done += 1
-
-            with beating("re-deriving timestamps", lambda: f"{ranges_done} ranges"):
-                rederive_timestamps(conn, db, on_range=one_range)
-        if stage in ("timestamps", "slices"):
-            _slice_every(conn, _every_visitor(conn))
-            with beating("rescuing orphan slices"):
-                rescue = rescue_orphan_slices(conn, db)
-        if stage in ("timestamps", "slices", "distill"):
-            with beating("distilling"):
-                run_distill(db, full=True)
-        _session_every(conn, _every_visitor(conn), definition)
-    elif dirty:
         _slice_every(conn, dirty)
         with beating("rescuing orphan slices"):
             rescue = rescue_orphan_slices(conn, db, visitors=dirty)
         with beating("distilling"):
             run_distill(db, full=False)
+    if stage is not None:
+        _session_every(conn, _every_visitor(conn), definition)
+    elif dirty:
         _session_every(conn, dirty, definition)
     if stage is not None or dirty:
-        _stamp_vintages(conn, definition)
+        _stamp_vintages(conn, vintages)
     return {"dirty": dirty, "stale": stage is not None, "from": stage, "rescue": rescue}

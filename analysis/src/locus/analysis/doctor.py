@@ -104,7 +104,7 @@ def _browser_check() -> dict:
     }
 
 
-def _derivations_check(db: str | None, bun_ok: bool, definition: dict) -> dict:
+def _derivations_check(db: str | None, definition: dict) -> dict:
     if db is None:
         return {
             "check": "derivations",
@@ -112,30 +112,27 @@ def _derivations_check(db: str | None, bun_ok: bool, definition: dict) -> dict:
             "note": "no events.db yet — nothing derived to check",
         }
     conn = connect(db)
-    found = {
-        "stale_vintage": derivations_stale(conn, definition),
-        "stranded_events": stranded_events(conn),
-    }
-    if not (found["stale_vintage"] or found["stranded_events"]):
-        conn.close()
-        return {"check": "derivations", "ok": True, **found}
-    if not bun_ok:
+    try:
+        stale = derivations_stale(conn, definition)
+    except SystemExit as unreadable:
+        found = {"stranded_events": stranded_events(conn)}
         conn.close()
         return {
             "check": "derivations",
             "ok": False,
             "found": found,
-            "fix": "the heal is the distillation pass, a bun script — "
-            "install bun (the bun check names it) and rerun doctor",
+            "finding": str(unreadable),
         }
+    found = {"stale_vintage": stale, "stranded_events": stranded_events(conn)}
+    if not (found["stale_vintage"] or found["stranded_events"]):
+        conn.close()
+        return {"check": "derivations", "ok": True, **found}
     done = finish_derivations(conn, db, definition)
     healed = {
         "re_derived": (
             f"every visitor, from the {done['from']} stage on — "
             + {
                 "timestamps": "timestamps, slices, rescue, distillation, sessions",
-                "slices": "slices, rescue, distillation, sessions",
-                "distill": "distillation, sessions",
                 "sessions": "sessions",
             }[done["from"]]
             if done["stale"]
@@ -336,7 +333,7 @@ def run_doctor(deployment_root: Path, db: str | None, definition: dict) -> dict:
     checks = [
         bun,
         _browser_check(),
-        _derivations_check(db, bun["ok"], definition),
+        _derivations_check(db, definition),
         _retention_check(deployment_root, db, definition),
         _reclaim_check(db),
         _store_check(deployment_root, bun["ok"]),

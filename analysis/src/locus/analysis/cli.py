@@ -28,7 +28,12 @@ from locus.evidence.deployment import (
 )
 from locus.evidence.deployment import ae_dataset as _ae_dataset
 from locus.evidence.deployment import store as _store
-from locus.evidence.derive import derivations_stale, finish_derivations, stale_stage
+from locus.evidence.derive import (
+    derivations_stale,
+    finish_derivations,
+    installed_vintages,
+    stale_stage,
+)
 from locus.evidence.retention import horizon_cutoff
 from locus.evidence.speak import speaking, speaking_into, started
 
@@ -307,6 +312,10 @@ def _load_and_derive(db: str, prefix: str) -> None:
     """The load itself: its own accounting, whatever the store made it skip, the derivation's progress, the retention sweep, and last the outcome."""
     from locus.evidence.load import LoadStats, load_chunks
 
+    # The derivation that finishes a load needs its identity; one that cannot be read stops the
+    # load before anything is fetched.
+    definition = _definition()
+    installed_vintages(definition)
     conn = connect(db)
     loaded = load_chunks(conn, _store(), prefix, stats=LoadStats(), cutoff=_cutoff())
     skipped = loaded["skipped_chunks"]
@@ -314,7 +323,6 @@ def _load_and_derive(db: str, prefix: str) -> None:
         print(loaded["stats"].final())
 
     # A widening to a full re-derivation is said out loud, before the long pass runs.
-    definition = _definition()
     stage = stale_stage(conn, definition)
     if stage is not None:
         print(

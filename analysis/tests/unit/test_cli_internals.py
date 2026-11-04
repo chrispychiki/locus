@@ -132,64 +132,6 @@ def test_a_small_say_echoes_inline_and_a_large_one_stays_behind_the_address(
     )
 
 
-def test_the_derivation_vintage_is_the_sources_own_identity(tmp_path, monkeypatch):
-    # Derived from the code itself, never a hand-bumped constant: a forgotten bump would make the
-    # detector affirm currency exactly when it lies.
-    import locus.evidence.derive as derive_mod
-
-    pkg = tmp_path / "distill"
-    pkg.mkdir()
-    (pkg / "distill.js").write_text("logic v1")
-    (pkg / "flatten.js").write_text("flatten v1")
-    py = tmp_path / "hydrate.py"
-    py.write_text("canonical ts logic v1")
-    sessions_py = tmp_path / "sessions.py"
-    sessions_py.write_text("session logic v1")
-    monkeypatch.setattr(
-        derive_mod,
-        "_stage_sources",
-        lambda: {
-            "timestamps": [py],
-            "slices": [],
-            "distill": sorted(pkg.glob("*.js")),
-            "sessions": [sessions_py],
-        },
-    )
-    definition = {
-        "session": {"inactivity_minutes": 30},
-        "engaged": {"min_seconds": 10, "min_pageviews": 2},
-        "path": "wherever",
-    }
-
-    first = derive_mod.derivation_vintage(definition)
-    assert first == derive_mod.derivation_vintage(definition), "stable across calls"
-
-    (pkg / "flatten.js").write_text("flatten v2")
-    second = derive_mod.derivation_vintage(definition)
-    assert second != first, "a logic change changes the identity"
-
-    # The path is wider than distillation: the Python side derives too — the canonical
-    # timestamp, slice grouping, rescue eligibility — and a change there is the same staleness.
-    py.write_text("canonical ts logic v2")
-    third = derive_mod.derivation_vintage(definition)
-    assert third != second
-
-    # Zero-maintenance coverage: a module nobody registered anywhere still counts.
-    (pkg / "new_stage.js").write_text("a whole new distillation stage")
-    fourth = derive_mod.derivation_vintage(definition)
-    assert fourth != third
-
-    # The sessions stage derives from a declaration too: the operator's numbers move its
-    # identity, and only its identity; where the file sits does not.
-    adjusted = {**definition, "session": {"inactivity_minutes": 45}}
-    assert derive_mod.derivation_vintage(adjusted) != fourth
-    assert (
-        derive_mod.stage_vintages(adjusted)["distill"]
-        == (derive_mod.stage_vintages(definition)["distill"])
-    )
-    assert derive_mod.derivation_vintage({**definition, "path": "elsewhere"}) == fourth
-
-
 def test_utc_ms_reads_iso_as_utc_and_refuses_epoch_seconds():
     from locus.analysis.ae import _utc_ms
 

@@ -39,7 +39,7 @@ RESCUE_MAX_GAP_MS = 10_000
 
 # The recorder's slice id: a zero-padded open-millisecond and a base36 disambiguator. Slice identity
 # is owned here, so the shape a reader accepts is declared here too — the store's own path gate
-# (store/src/keys.js) is the same grammar on the write side, and test_slices.py runs the two
+# (store/src/keys.js) is the same grammar on the write side, and test_slices_across_js.py runs the two
 # over one case list so they cannot drift apart silently. ASCII because JS \d is ASCII: without the
 # flag Python's \d also takes Unicode digits, and the twins disagree. \Z because JS $ is \Z:
 # Python's $ also matches before a trailing newline, and the twins disagree there too.
@@ -308,8 +308,9 @@ def opened_a_page(conn: sqlite3.Connection, slice_row) -> bool:
 def require_bun() -> None:
     if shutil.which("bun") is None:
         raise SystemExit(
-            "no bun on PATH: the distillation pass, the rescue gate, and the "
-            "store integrity check are bun scripts. Install it from "
+            "no bun on PATH: the distillation pass, the rescue gate, the store "
+            "integrity check, and reading whether the derived surfaces are "
+            "current all run on bun. Install it from "
             "https://bun.sh"
         )
 

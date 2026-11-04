@@ -540,18 +540,16 @@ def test_a_full_rederivation_is_said_on_the_outcome_line(tmp_path, capsys, monke
 
     db = data_home(tmp_path) / "events.db"
     conn = connect(db)
-    conn.execute(
-        "UPDATE meta SET value = 'stale' WHERE key IN ('derivation_vintage', 'vintage_slices')"
-    )
+    conn.execute("UPDATE meta SET value = 'stale' WHERE key = 'vintage_code'")
     conn.commit()
     conn.close()
     main(["load"])
     outcome = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert outcome["headline"].startswith("loaded 0 new events")
     assert outcome["headline"].endswith(
-        "re-derived every visitor from the slices stage on because the derivation changed"
+        "re-derived every visitor from the timestamps stage on because the derivation changed"
     )
-    assert outcome["rederived_from"] == "slices"
+    assert outcome["rederived_from"] == "timestamps"
 
 
 def test_a_load_that_dies_before_distillation_is_finished_by_the_next_load(
@@ -611,7 +609,7 @@ def test_a_load_that_dies_before_distillation_is_finished_by_the_next_load(
     assert re.search(r"\b1\b.*visitor", said)
 
 
-def test_a_load_after_an_distillation_code_change_re_derives_everything(
+def test_a_load_after_a_code_change_re_derives_everything(
     tmp_path, capsys, monkeypatch
 ):
     import locus.evidence.derive as derive_mod
@@ -660,9 +658,7 @@ def test_a_load_after_an_distillation_code_change_re_derives_everything(
     # The deriving code changes out from under the accreted db: the next load — even one that
     # fetches nothing — says so plainly and re-derives every visitor, so nothing ever reads
     # mixed-vintage columns.
-    monkeypatch.setattr(
-        "locus.evidence.derive.derivation_vintage", lambda definition: "a new vintage"
-    )
+    monkeypatch.setattr(derive_mod, "_LOADED_CODE", "a new vintage")
     main(["load"])
     said = artifact(capsys.readouterr().out).read_text()
     assert "derivation" in said

@@ -15,6 +15,11 @@ from _support import (
 from locus.analysis.cli import main
 from locus.analysis.model.cards import models_speaking, pricing
 from locus.evidence.db import connect
+from locus.evidence.derive import (
+    VintageUnreadable,
+    installed_vintages,
+    stamped_vintages,
+)
 from locus.evidence.speak import ECHO_BYTES
 
 STORE_OK = "console.log('  OK    everything matches'); process.exit(0);"
@@ -120,12 +125,7 @@ def test_doctor_heals_stranded_rows_through_the_load_path(
     assert conn.execute("SELECT COUNT(*) FROM slices").fetchone()[0] > 0, (
         "the heal is the load path whole — slice materialization included, or a later load would never revisit these rows"
     )
-    assert (
-        conn.execute(
-            "SELECT value FROM meta WHERE key = 'derivation_vintage'"
-        ).fetchone()
-        is not None
-    )
+    assert stamped_vintages(conn)
 
     checks = run_doctor(capsys)
     assert checks["derivations"]["stranded_events"] == 0
@@ -157,21 +157,14 @@ def test_the_heal_says_itself_into_the_run_log(tmp_path, capsys, monkeypatch):
 def test_doctor_heals_a_stale_vintage_by_full_re_derive(tmp_path, capsys, monkeypatch):
     healthy_surroundings(tmp_path, monkeypatch)
     db = _hydrated_db(tmp_path, derived=True)
-    monkeypatch.setattr(
-        "locus.evidence.derive.derivation_vintage", lambda definition: "a new vintage"
-    )
+    monkeypatch.setattr("locus.evidence.derive._LOADED_CODE", "a new vintage")
 
     checks = run_doctor(capsys)
     assert checks["derivations"]["found"]["stale_vintage"] is True
     assert checks["derivations"]["healed"]["re_derived"] == (
         "every visitor, from the timestamps stage on — timestamps, slices, rescue, distillation, sessions"
     )
-    assert (
-        connect(db)
-        .execute("SELECT value FROM meta WHERE key = 'derivation_vintage'")
-        .fetchone()["value"]
-        == "a new vintage"
-    )
+    assert stamped_vintages(connect(db)) == installed_vintages(definition_at(tmp_path))
 
     checks = run_doctor(capsys)
     assert checks["derivations"]["stale_vintage"] is False
@@ -201,9 +194,7 @@ def test_the_stale_heal_walks_the_whole_derivation_path(tmp_path, capsys, monkey
     )
     conn.commit()
     conn.close()
-    monkeypatch.setattr(
-        "locus.evidence.derive.derivation_vintage", lambda definition: "a new vintage"
-    )
+    monkeypatch.setattr("locus.evidence.derive._LOADED_CODE", "a new vintage")
 
     run_doctor(capsys)
     conn = connect(db)
@@ -221,15 +212,24 @@ def test_the_stale_heal_walks_the_whole_derivation_path(tmp_path, capsys, monkey
     ), "the slice derivation re-derived from raw_json"
 
 
+def without_bun(monkeypatch):
+    """No bun on PATH since the process started, so the code's identity, which bun reads, could not be read."""
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(
+        "locus.evidence.derive._LOADED_CODE",
+        VintageUnreadable("the derivation's code cannot be read: FileNotFoundError"),
+    )
+
+
 def test_doctor_names_the_installs_it_cannot_do(tmp_path, capsys, monkeypatch):
     healthy_surroundings(tmp_path, monkeypatch)
     db = _hydrated_db(tmp_path)
-    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    without_bun(monkeypatch)
 
     checks = run_doctor(capsys, clean=False)
     assert "bun.sh" in checks["bun"]["fix"]
     assert checks["derivations"]["ok"] is False
-    assert "bun" in checks["derivations"]["fix"]
+    assert checks["derivations"]["finding"] == checks["bun"]["fix"]
     assert (
         connect(db)
         .execute("SELECT COUNT(*) FROM events WHERE type_str IS NULL")
@@ -237,6 +237,23 @@ def test_doctor_names_the_installs_it_cannot_do(tmp_path, capsys, monkeypatch):
         > 0
     ), "no runtime, no heal — the finding stands untouched"
     assert checks["store"]["ok"] is False and "bun" in checks["store"]["finding"]
+
+
+def test_an_unreadable_code_identity_is_a_finding_and_every_check_still_runs(
+    tmp_path, capsys, monkeypatch
+):
+    healthy_surroundings(tmp_path, monkeypatch)
+    _hydrated_db(tmp_path, derived=True)
+    monkeypatch.setattr(
+        "locus.evidence.derive._LOADED_CODE",
+        VintageUnreadable("aria-query, which distillation imports, is not installed"),
+    )
+
+    checks = run_doctor(capsys, clean=False)
+    assert checks["bun"]["ok"] is True
+    assert checks["derivations"]["ok"] is False
+    assert "aria-query" in checks["derivations"]["finding"]
+    assert {"retention", "reclaim", "store", "profile_size"} <= checks.keys()
 
 
 def test_doctor_flags_a_missing_browser_and_names_the_install(
@@ -403,105 +420,8 @@ def test_doctor_heals_rows_distilled_against_no_slice(tmp_path, capsys, monkeypa
     assert run_doctor(capsys)["derivations"]["stranded_events"] == 0
 
 
-def test_the_heal_starts_at_the_stage_whose_code_changed(tmp_path, capsys, monkeypatch):
-    # Each stage derives from the one before, so a change to distillation alone has nothing
-    # to say about slices or timestamps: the heal re-distills and leaves them standing, while
-    # a change to the slice stage re-slices and re-distills but never touches a timestamp.
-    from locus.evidence import derive as derive_mod
-
-    healthy_surroundings(tmp_path, monkeypatch)
-    db = _hydrated_db(tmp_path, derived=True)
-    definition = definition_at(tmp_path)
-    installed = derive_mod.stage_vintages(definition)
-
-    conn = connect(db)
-    # The stream's last event, moved later: still last, so the slice it ends keeps its
-    # verdict — a corruption the slice stage can leave standing without being wrong.
-    event = conn.execute(
-        "SELECT id, timestamp FROM events ORDER BY timestamp DESC, id DESC LIMIT 1"
-    ).fetchone()
-    conn.execute(
-        "UPDATE events SET timestamp = timestamp + 12345 WHERE id = ?", (event["id"],)
-    )
-    a_slice = conn.execute(
-        "SELECT id FROM slices WHERE status = 'replayable' LIMIT 1"
-    ).fetchone()
-    conn.execute(
-        "UPDATE slices SET status = 'discarded', reason = 'corrupted by hand' WHERE id = ?",
-        (a_slice["id"],),
-    )
-    distilled = conn.execute(
-        "SELECT id, type_str FROM events WHERE type_str IS NOT NULL ORDER BY id LIMIT 1"
-    ).fetchone()
-    conn.execute(
-        "UPDATE events SET type_str = 'corrupted by hand' WHERE id = ?",
-        (distilled["id"],),
-    )
-    conn.commit()
-    conn.close()
-
-    monkeypatch.setattr(
-        derive_mod,
-        "stage_vintages",
-        lambda definition: {**installed, "distill": "a new distill"},
-    )
-    checks = run_doctor(capsys)
-    assert checks["derivations"]["healed"]["re_derived"].endswith(
-        "on — distillation, sessions"
-    )
-    conn = connect(db)
-    assert (
-        conn.execute(
-            "SELECT type_str FROM events WHERE id = ?", (distilled["id"],)
-        ).fetchone()["type_str"]
-        == distilled["type_str"]
-    ), "distillation re-derived"
-    assert (
-        conn.execute(
-            "SELECT status FROM slices WHERE id = ?", (a_slice["id"],)
-        ).fetchone()["status"]
-        == "discarded"
-    ), "the slice stage was not re-derived: its code did not change"
-    assert (
-        conn.execute(
-            "SELECT timestamp FROM events WHERE id = ?", (event["id"],)
-        ).fetchone()["timestamp"]
-        == event["timestamp"] + 12345
-    ), "the timestamp stage was not re-derived either"
-    conn.close()
-
-    monkeypatch.setattr(
-        derive_mod,
-        "stage_vintages",
-        lambda definition: {
-            **installed,
-            "slices": "a new slicing",
-            "distill": "a new distill",
-        },
-    )
-    checks = run_doctor(capsys)
-    assert checks["derivations"]["healed"]["re_derived"].endswith(
-        "on — slices, rescue, distillation, sessions"
-    )
-    conn = connect(db)
-    assert (
-        conn.execute(
-            "SELECT status FROM slices WHERE id = ?", (a_slice["id"],)
-        ).fetchone()["status"]
-        == "replayable"
-    ), "the slice stage re-derived"
-    assert (
-        conn.execute(
-            "SELECT timestamp FROM events WHERE id = ?", (event["id"],)
-        ).fetchone()["timestamp"]
-        == event["timestamp"] + 12345
-    ), "timestamps stand: their stage's code did not change"
-    assert derive_mod.stale_stage(conn, definition) is None
-    conn.close()
-
-
 def test_a_definition_edit_re_derives_sessions_alone(tmp_path, capsys, monkeypatch):
-    """The operator's numbers are part of the sessions stage's identity: an edit to definitions.toml is staleness that heals from that stage and no earlier one, and a comment edit is not."""
+    """The operator's numbers are their own part of the identity: an edit to definitions.toml is staleness that heals from that stage and no earlier one, and a comment edit is not."""
     from locus.evidence import derive as derive_mod
 
     healthy_surroundings(tmp_path, monkeypatch)
@@ -511,8 +431,8 @@ def test_a_definition_edit_re_derives_sessions_alone(tmp_path, capsys, monkeypat
     conn = connect(db)
     sessions_before = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     assert sessions_before > 0
-    stamped_slices = conn.execute(
-        "SELECT value FROM meta WHERE key = 'vintage_slices'"
+    stamped_code = conn.execute(
+        "SELECT value FROM meta WHERE key = 'vintage_code'"
     ).fetchone()[0]
     conn.close()
 
@@ -530,10 +450,8 @@ def test_a_definition_edit_re_derives_sessions_alone(tmp_path, capsys, monkeypat
         conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] > sessions_before
     ), "a zero gap makes every act its own session"
     assert (
-        conn.execute("SELECT value FROM meta WHERE key = 'vintage_slices'").fetchone()[
-            0
-        ]
-        == stamped_slices
+        conn.execute("SELECT value FROM meta WHERE key = 'vintage_code'").fetchone()[0]
+        == stamped_code
     )
     assert derive_mod.stale_stage(conn, definition_at(tmp_path)) is None
     conn.close()
