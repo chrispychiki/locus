@@ -1,4 +1,6 @@
-"""Every turn of a conversation reaches the model's chat template as it was sent: a tool's reply keeps its images, an assistant answer keeps its reasoning, and a request's chat_template_kwargs reach the template.
+"""Every turn of a conversation reaches the model's chat template as it was sent: no turn is compacted away, a tool's reply keeps its images, an assistant answer keeps its reasoning, and a request's chat_template_kwargs reach the template.
+
+Unless a request sends `context_management: []`, upstream's chat handler compacts a conversation: it clamps max_tokens to the context left and, past the context limit, swaps the conversation's head, the evidence an answer cites, for a model-written summary. Patched: the handler never compacts, and a request that asks it to is refused with a 400 (compacts).
 
 Qwen's chat template renders a tool message's images in place and, under its preserve_thinking option, every assistant turn's reasoning; Qwen's model card recommends that option for agent use. Upstream drops each on the way to the template:
 - a tool message's images: the chat handler and the request normalizer take images from user messages only. Patched: they take a tool message's images the same way.
@@ -33,6 +35,14 @@ EXPECTED_SHA256 = {
 
 REWRITES = {
     "server/openai.py chat_completions_endpoint": [
+        (
+            "        if request.context_management != []:\n",
+            (
+                "        from locus.analysis.mlx.chat_turns import compacts\n"
+                "\n"
+                "        if compacts(request):\n"
+            ),
+        ),
         (
             'if message.role == "user":',
             f"if message.role in {IMAGE_ROLES!r}:",
@@ -127,7 +137,8 @@ PINNED = {
 
 OWES = (
     "Each rewrite rests on its lines doing in the new source what they did in the pinned one — "
-    "the handler collecting a message's images, building the template's keyword arguments and "
+    "the handler compacting only inside the block its context_management test gates, "
+    "collecting a message's images, building the template's keyword arguments and "
     "rendering with them, the normalizer choosing which roles keep list content, "
     "apply_chat_template choosing which messages pass to the template intact and counting a tool "
     "message's image markers, get_chat_template building what the template renders with — "
@@ -152,6 +163,22 @@ def refused_as_400(step):
             raise HTTPException(status_code=400, detail=str(refusal)) from refusal
 
     return refusing
+
+
+def compacts(request) -> bool:
+    """The handler's compaction gate, always False here. A request that asks for compaction is refused as the client's error (400); every other is served as composed, whether it sends `context_management` or not."""
+    if request.context_management:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "this server never compacts a conversation: it serves every "
+                "conversation as composed, and refuses one over the context limit; "
+                "send no context_management"
+            ),
+        )
+    return False
 
 
 def request_options(request) -> dict | None:

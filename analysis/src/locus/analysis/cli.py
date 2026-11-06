@@ -824,7 +824,13 @@ def _analyze(args) -> None:
         _result(
             {
                 "current_timestamp": utc_stamp(),
-                "headline": f"answered — {Path(result['response_path']).name}",
+                "headline": f"answered — {Path(result['response_path']).name}"
+                + (
+                    f"; {result['refused_screenshots']} pulled screenshot(s) "
+                    f"refused — no room left in the context"
+                    if result["refused_screenshots"]
+                    else ""
+                ),
                 **result,
             }
         )

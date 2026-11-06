@@ -1326,6 +1326,7 @@ def test_analyze_derives_the_analysis_dir_from_occasion_and_subject(
         return {
             "dir": str(out),
             "response_path": str(out / "2_answer_response.txt"),
+            "refused_screenshots": 0,
         }
 
     monkeypatch.setattr("locus.analysis.engine.run_analysis", fake_analysis)
@@ -1396,6 +1397,7 @@ def test_a_multi_slice_analysis_subject_counts_its_extras(
         return {
             "dir": str(out),
             "response_path": str(out / "2_answer_response.txt"),
+            "refused_screenshots": 0,
         }
 
     monkeypatch.setattr("locus.analysis.engine.run_analysis", fake_analysis)

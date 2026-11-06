@@ -44,7 +44,6 @@ def chat(
         "max_tokens": max_tokens,
         "enable_thinking": enable_thinking,
         "stream": stream,
-        "context_management": [],
     }
     if stream:
         body["stream_options"] = {"include_usage": True}
@@ -418,7 +417,6 @@ def test_the_in_process_count_is_the_servers_count(tmp_path):
         "max_tokens": 16,
         "enable_thinking": True,
         "chat_template_kwargs": {"preserve_thinking": True},
-        "context_management": [],
     }
     served = requests.post(CHAT, json=body, timeout=TIMEOUT)
     served.raise_for_status()
@@ -464,7 +462,6 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
         "max_tokens": 16,
         "enable_thinking": True,
         "chat_template_kwargs": {"preserve_thinking": True},
-        "context_management": [],
     }
     requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
     rendered = last_rendered_prompt()
@@ -483,6 +480,41 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
     )
     assert refused.status_code == 400
     assert "never reads" in refused.text
+
+
+def test_a_conversation_is_served_as_composed_and_never_compacted():
+    """Compaction would serve a conversation the client never composed — its head summarized, its max_tokens clamped to the context left — so a request that asks for it is refused, and one over the context limit is refused rather than compacted to fit."""
+    from locus.analysis.model.cards import load_card
+
+    body = {
+        "model": loaded_model(),
+        "messages": [{"role": "user", "content": "Say hi."}],
+        "max_tokens": 16,
+        "enable_thinking": False,
+    }
+    asked = requests.post(
+        CHAT,
+        json={
+            **body,
+            "context_management": [{"type": "compaction", "compact_threshold": 1}],
+        },
+        timeout=TIMEOUT,
+    )
+    assert asked.status_code == 400
+    assert "never compacts" in asked.text
+
+    over = requests.post(
+        CHAT,
+        json={
+            **body,
+            "max_tokens": load_card("qwen3.6-35b-a3b-6bit")["context_tokens"],
+        },
+        timeout=TIMEOUT,
+    )
+    assert over.status_code == 400
+    assert "MAX_KV_SIZE" in over.text
+
+    requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
 
 
 def test_the_clients_pre_send_count_is_what_the_server_reports(tmp_path):

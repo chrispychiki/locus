@@ -96,7 +96,7 @@ class TestTelemetryMiddleware:
         assert FakeTelemetry.instances == []
 
     def test_cache_cleared_after_the_end_snapshot(self, monkeypatch):
-        """The allocator's buffer cache is wired memory the OS cannot reclaim while the model idles holding it, so every generating request must end with a clear — taken after the end snapshot, so the telemetry still records what the request held."""
+        """The allocator's buffer cache is memory the process would otherwise go on holding between requests, so every generating request must end with a clear — taken after the end snapshot, so the telemetry still records what the request held."""
         import mlx.core as mx
 
         order = []

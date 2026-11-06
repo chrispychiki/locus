@@ -1,4 +1,4 @@
-"""The chat-turns patch (mlx/chat_turns.py) over the model's real processor and template, with neither the server nor the weights: a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the rendering, the count reads them as the server will, and drift in any source the patch rests on refuses before anything is swapped.
+"""The chat-turns patch (mlx/chat_turns.py) over the model's real processor and template, with neither the server nor the weights: a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the rendering, the count reads them as the server will, no conversation is compacted, and drift in any source the patch rests on refuses before anything is swapped.
 
 The count runs the patched functions in this process (count.py), so its rendering is the server's; model_server_tests/test_integration.py proves the handler's half against the live server.
 """
@@ -139,6 +139,33 @@ def test_a_refused_option_is_the_clients_error():
     assert raised.value.status_code == 400
 
 
+@pytest.mark.parametrize("extra", [{}, {"context_management": []}])
+def test_a_conversation_is_never_compacted(extra):
+    request = openai.ChatRequest(**_answered(**extra))
+    assert chat_turns.compacts(request) is False
+
+
+def test_a_request_asking_for_compaction_is_refused_before_anything_loads(
+    monkeypatch,
+):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    def loading(*args, **kwargs):
+        raise AssertionError("the model was reached")
+
+    chat_turns.install_chat_turns()
+    monkeypatch.setattr(openai, "get_cached_model", loading)
+    request = openai.ChatRequest(
+        **_answered(context_management=[{"type": "compaction", "compact_threshold": 1}])
+    )
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(openai.chat_completions_endpoint(request, None))
+    assert raised.value.status_code == 400
+    assert "never compacts" in raised.value.detail
+
+
 def test_installing_again_changes_nothing():
     chat_turns.install_chat_turns()
     before = _codes()
@@ -157,7 +184,9 @@ def test_the_route_runs_the_rewritten_handler():
         if getattr(route, "path", None) in ("/chat/completions", "/v1/chat/completions")
     }
     assert endpoints == {openai.chat_completions_endpoint}
-    assert "refused_as_400" in openai.chat_completions_endpoint.__code__.co_names
+    names = openai.chat_completions_endpoint.__code__.co_names
+    assert "refused_as_400" in names
+    assert "compacts" in names
 
 
 @pytest.fixture

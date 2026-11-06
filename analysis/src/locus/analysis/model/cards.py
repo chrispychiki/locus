@@ -9,8 +9,8 @@ That declaration is what routes; the card's name is a label.
 
 Every entry, either client, declares two composition facts: context_tokens (the model's native context — max_position_embeddings, no RoPE scaling) and headroom, the fraction of it one call's model-payload may claim.
 Headroom is the whole reserve.
-What follows turn 1 — the model's thinking and answer, the screenshots they pull, the history re-sent on the next turn — cannot be counted before the model has spoken, so it is not counted; a share of the context is left free for it, and every turn after the first is measured exactly, at the wire, against what is actually left.
-The right share differs per model because what fills it differs: a local pull arrives at native pixels and a Gemini one at a flat price.
+What follows turn 1 — the model's reasoning and answers, the screenshots they pull, a citation repair — cannot be counted before the model has spoken, so it is not counted; a share of the context is left free for it (and on a local card, whose context holds generation too, for the output cap every request needs free when it is sent), and every turn after the first is measured exactly, at the wire, against what is actually left.
+The share is a round number wide enough for what ordinary runs do after turn 1, repair included.
 
 An openai-compatible card additionally is the caller's complete statement of generation intent: the repo to request and its sampling regime (the model vendor's published recommendations for thinking, the one mode the bundled server runs).
 Config is a client-side notion only: every value is sent explicitly on every request, so the persisted payload is the full record of what was asked for.

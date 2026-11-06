@@ -799,9 +799,6 @@ def test_request_states_full_config_explicitly(tmp_path):
     assert params["extra_body"]["enable_thinking"] is True
     assert params["extra_body"]["thinking_budget"] == card["thinking_budget"]
     assert params["max_tokens"] == card["max_tokens"]
-    assert params["extra_body"]["context_management"] == [], (
-        "without it upstream compacts the conversation instead of serving it as composed"
-    )
 
 
 class _FakeStream:
@@ -1652,7 +1649,6 @@ def test_persisted_meta_is_the_complete_config_record(tmp_path):
     assert config["base_url"] == card["base_url"]
     assert config["enable_thinking"] is True
     assert config["thinking_budget"] == card["thinking_budget"]
-    assert config["context_management"] == []
     assert config["max_tokens"] == card["max_tokens"]
 
 

@@ -7,7 +7,6 @@ Client and server share a filesystem: images travel as plain absolute paths and 
 - thinking arrives as `reasoning` on the message (`reasoning_content` is read first for compatibility); every assistant turn replays with its thinking under both keys, and the server hands `reasoning_content` to the chat template, which renders it by the model family's own convention (Qwen's renders only the turns since the conversation's last user message unless the card's `chat_template_kwargs` sets preserve_thinking, which renders them all);
 - the default timeout is None — infinite — because local generation can outrun any fixed budget;
 - every request is counted before send and refused loud when the count plus max_tokens exceeds the card's context_tokens. The count is the server's own, run here by the server's own code over the request as it will be sent (mlx/count.py), so the refusal, context_remaining and pricing (budget.py) all read the number the server will report. The server enforces the same bound when MAX_KV_SIZE is set; the client refusal is the informative half, made before a doomed request waits on admission;
-- every request sends `context_management: []`. Upstream's chat handler otherwise compacts the conversation: it clamps max_tokens to the context left and, past the limit, replaces the conversation's head with a model-written summary. With it, the conversation is served exactly as composed, and a request over the limit meets the server's own refusal;
 - the renderer draws each screenshot at the size screenshot_size gives its viewport from the card's `image_tokens` value for its kind, activity or pulled, and that file is what is sent;
 - every request streams (`stream_options.include_usage`) and is reassembled here into the same persisted record a non-streamed call would leave: content and reasoning deltas concatenated, tool-call deltas merged by index, usage from the terminal usage chunk. Streaming is what makes a long generation legible while it runs — the deltas are the run's progress, and the server serves one request at a time from admission to the end of its response;
 - that terminal usage chunk carries a `timings` sibling to `usage` (prompt/generation token rates and ms, cache hits, peak model memory) that the openai SDK does not model; it survives as `model_extra` and is folded into the persisted usage record — the local analogue of Gemini's usage breakdown. The response's `x-locus-request` header is folded in too (`server_request`): it is the id keying the server's per-request memory telemetry, so the persisted record names its own rows in the server's memory log.
@@ -188,7 +187,6 @@ class OpenAICompatConversation(Conversation):
             "extra_body": {
                 "enable_thinking": True,
                 "thinking_budget": self.thinking_budget,
-                "context_management": [],
             },
         }
         if self.template_options:
@@ -393,7 +391,6 @@ class OpenAICompatConversation(Conversation):
             "base_url": self.base_url,
             "enable_thinking": True,
             "thinking_budget": self.thinking_budget,
-            "context_management": [],
             "max_tokens": self.max_tokens,
             "context_tokens": self.context_tokens,
             **self.sampling,

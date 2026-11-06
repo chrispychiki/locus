@@ -1,7 +1,7 @@
 """Thin locus layer over the upstream mlx-vlm server.
 
 Upstream (mlx_vlm.server) owns generation: continuous batching, structured output, thinking budget, APC prefix caching, speculative decode, vision feature cache.
-This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent (chat_turns.py), and two math-preserving patches (the vision-encode chunking, the fused attention). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
+This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent, never compacted (chat_turns.py), and two math-preserving patches (the vision-encode chunking, the fused attention). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
 README.md says what each is for.
 
 Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
@@ -18,7 +18,8 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: install_pixel_release drops them from the request's inputs once they are encoded.
 - a caller that disconnects ends its HTTP response at once, while the GPU loop drops the request only at its next step, or never hears the cancel and runs it to its last token.
   Patched here: install_gpu_tracking counts the requests the loop holds, and admission frees its slot only once that count is zero.
-- the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request. Every locus client sends `[]` (model/openai_compat.py, chat.py).
+- the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request.
+  Patched here: chat_turns.install_chat_turns has the handler never compact, and refuses a request that asks it to.
 - thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
 
 Usage: locus-mlx-serve <model-slug>   (slugs are the models.toml keys)
@@ -505,7 +506,7 @@ class AdmissionMiddleware:
 
 
 class TelemetryMiddleware:
-    """Pure ASGI (BaseHTTPMiddleware buffers and breaks SSE streaming): brackets each generating request with the full-signal memory sampler and logs the summary when the response — streamed or not — finishes sending. Then releases the allocator's buffer cache, which is wired memory the OS cannot reclaim while the model idles holding it. The clear runs after the end snapshot, so the telemetry still records what the request held.
+    """Pure ASGI (BaseHTTPMiddleware buffers and breaks SSE streaming): brackets each generating request with the full-signal memory sampler and logs the summary when the response — streamed or not — finishes sending. Then releases the allocator's buffer cache, memory the process would otherwise go on holding between requests. The clear runs after the end snapshot, so the telemetry still records what the request held.
 
     The bracket opens by resetting mlx's peak, so the peak every reader of this request sees — the serve-log line, the memory.jsonl rows, the `timings` upstream returns — is this request's own. It sits inside admission, which opens only once the GPU loop holds nothing, so no other request's work lands in it. mlx restarts the peak from zero and raises it at each allocation, so a reading before the request first allocates — its start row — is 0. The peak counts mlx's live arrays only — the weights, the KV cache, the vision feature cache, the request's working set — never the allocator's buffer cache or the machine's wired memory, which the snapshot reads beside it.
 
@@ -784,7 +785,7 @@ def main() -> None:
     from .telemetry import memory_snapshot
 
     logger.info(
-        f"Wired and memory limits set to {cap // 2**20} MB (the iogpu.wired_limit_mb sysctl — the operator's dial). The wired limit keeps that many bytes resident (mlx.core.set_wired_limit). The memory limit matches it so the allocator reclaims its own cache at the dial instead of growing past it toward MLX's default of 1.5x the device's recommended working set; past the limit MLX keeps allocating while the machine still has RAM or swap and raises when it has neither (mlx.core.set_memory_limit)."
+        f"Wired and memory limits set to {cap // 2**20} MB (the iogpu.wired_limit_mb sysctl — the operator's dial). The wired limit keeps up to that many bytes resident (mlx.core.set_wired_limit). The memory limit matches it so the allocator reclaims its own cache at the dial instead of growing past it toward MLX's default of 1.5x the device's recommended working set; past the limit MLX keeps allocating while the machine still has RAM or swap and raises when it has neither (mlx.core.set_memory_limit)."
     )
     logger.info(f"Boot memory snapshot: {memory_snapshot()}")
     logger.info(
@@ -824,7 +825,7 @@ def main() -> None:
 
     install_chat_turns()
     logger.info(
-        "chat turns installed: a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the chat template"
+        "chat turns installed: no conversation is compacted, and a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the chat template"
     )
 
     admission = Admission()
