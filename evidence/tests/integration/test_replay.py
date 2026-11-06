@@ -835,7 +835,10 @@ def test_a_player_never_writes_into_the_payload(tmp_path):
         "timestamp": 2500,
         "data": {
             "source": IncrementalSource.MouseMove,
-            "positions": [{"x": 5, "y": 5, "id": 4, "timeOffset": -600}],
+            "positions": [
+                {"x": 5, "y": 5, "id": 4, "timeOffset": -600},
+                {"x": 6, "y": 6, "id": 4, "timeOffset": 0},
+            ],
         },
     }
     conn, ids = synthetic_page(

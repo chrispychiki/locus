@@ -43,7 +43,7 @@ _MOVE_SOURCES = {
 
 
 def canonical_ts(event: dict) -> int:
-    """The event's place on the canonical clock: a move batch lands at its last position's moment (timestamp + timeOffset), every other event at its own timestamp. A derived value — the timestamp column re-derives from raw_json through this whenever the deriving code changes (derive.py owns that currency)."""
+    """The event's place on the canonical clock: a move batch lands at its last position's moment (timestamp + timeOffset), every other event at its own timestamp. Touch moves and drags are placed exactly as mouse moves are: the recorder sends all three after the movement, and rrweb's playback correcting for that only on mouse moves is a gap in rrweb, not a difference in when the visitor moved. A derived value — the timestamp column re-derives from raw_json through this whenever the deriving code changes (derive.py owns that currency)."""
     data = event.get("data") or {}
     if (
         event.get("type") == EventType.IncrementalSnapshot
@@ -55,8 +55,28 @@ def canonical_ts(event: dict) -> int:
     return event["timestamp"]
 
 
+def on_canonical_clock(event: dict) -> dict:
+    """The event at its canonical_ts, for a replayer. A replayer needs no event exactly as recorded: it places each event by its timestamp, so replay runs on the canonical clock as analysis does. A move batch's own timestamp is when the recorder sent it, after its positions, and a seek applies only events stamped before its moment, so on the recorder's clock a seek to a movement misses it. Here the batch takes its canonical_ts and every position's timeOffset shifts by the same amount, so each position keeps its moment (timestamp + timeOffset) and the replayer's timestamp sort keeps canonical order. rrweb plays a touch or drag batch at its own timestamp, all its positions in one frame, so on this clock a finger or a drag lands where and when the movement ended."""
+    stamp = canonical_ts(event)
+    shift = event["timestamp"] - stamp
+    if shift == 0:
+        return event
+    data = event["data"]
+    return {
+        **event,
+        "timestamp": stamp,
+        "data": {
+            **data,
+            "positions": [
+                {**position, "timeOffset": position["timeOffset"] + shift}
+                for position in data["positions"]
+            ],
+        },
+    }
+
+
 def event_skip_reason(event) -> str | None:
-    """Why an event cannot land as a canonical row — None when it can. Checks exactly the shape row construction and canonical ordering touch: object shape, integer type, numeric timestamp, string counter, object data, and a numeric timeOffset on the last move position (it decides the canonical timestamp). The recorder stamps a counter on every event it emits, so an event without one is damaged: without the counter, same-millisecond order would be whichever chunk GET happened to return first. The store read path gates on this at decode, where the loss is still nameable by its chunk; hydration itself trusts its callers and checks nothing."""
+    """Why an event cannot land as a canonical row — None when it can. Checks exactly the shape row construction, canonical ordering and on_canonical_clock touch: object shape, integer type, numeric timestamp, string counter, object data, and a numeric timeOffset on every move position (the last decides the canonical timestamp, and on_canonical_clock shifts them all). The recorder stamps a counter on every event it emits, so an event without one is damaged: without the counter, same-millisecond order would be whichever chunk GET happened to return first. The store read path gates on this at decode, where the loss is still nameable by its chunk; hydration itself trusts its callers and checks nothing."""
     if not isinstance(event, dict):
         return "not an object"
     if type(event.get("type")) is not int:
@@ -78,11 +98,12 @@ def event_skip_reason(event) -> str | None:
         positions = data.get("positions")
         if positions is not None and not isinstance(positions, list):
             return "positions is not a list"
-        if positions and not (
-            isinstance(positions[-1], dict)
-            and type(positions[-1].get("timeOffset")) in (int, float)
+        if positions and not all(
+            isinstance(position, dict)
+            and type(position.get("timeOffset")) in (int, float)
+            for position in positions
         ):
-            return "last move position has no numeric timeOffset"
+            return "a move position has no numeric timeOffset"
     return None
 
 

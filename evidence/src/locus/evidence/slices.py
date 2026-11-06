@@ -27,7 +27,7 @@ import subprocess
 
 from .assets import script
 from .db import CANONICAL_ORDER, SLICE_FACTS
-from .hydrate import raw_event
+from .hydrate import on_canonical_clock, raw_event
 from .kinds import Kind
 from .rrweb_constants import EventType, IncrementalSource
 
@@ -70,7 +70,7 @@ def group_slices(
 
 
 def covering_pair(events: list) -> tuple | None:
-    """One slice's (Meta, FullSnapshot), if the snapshot the Meta heralds actually arrived behind it. Only `type` is read, so a slice's events serve here either as raw events or as db rows carrying that column."""
+    """One slice's (Meta, FullSnapshot), if the snapshot the Meta heralds actually arrived behind it. Only `type` is read, so a slice's events serve here either as slice_events gives them or as db rows carrying that column."""
     for a, b in itertools.pairwise(events):
         if a["type"] == EventType.Meta and b["type"] == EventType.FullSnapshot:
             return a, b
@@ -117,7 +117,7 @@ def discard_reason(events: list[dict]) -> str | None:
 
 
 def viewport_at(events: list[dict], ts: int) -> tuple[int, int]:
-    """The viewport a slice shows at `ts` — what its replay is sized to there, and so the size of a screenshot taken there: the last Meta or ViewportResize stamped at or before it, read from the slice's raw events in canonical order (any subset holding those two kinds will do). The replayer resizes its frame at each of them as it applies them. A resize reported at zero width or height leaves the frame showing nothing, so the size it last showed stands."""
+    """The viewport a slice shows at `ts` — what its replay is sized to there, and so the size of a screenshot taken there: the last Meta or ViewportResize stamped at or before it, read from the slice's events in canonical order, as slice_events gives them (any subset holding those two kinds will do). The replayer resizes its frame at each of them as it applies them. A resize reported at zero width or height leaves the frame showing nothing, so the size it last showed stands."""
     viewport = None
     for event in events:
         if event["timestamp"] > ts:
@@ -154,12 +154,12 @@ def viewport_events(conn: sqlite3.Connection, slice_id: int) -> list[dict]:
 
 
 def slice_events(conn: sqlite3.Connection, slice_id: int) -> list[dict]:
-    """A slice's raw events in canonical order — the replayable unit."""
+    """A slice's events in canonical order, each on the canonical clock (hydrate.on_canonical_clock): the replayable unit, which the replayer plays in the order and at the moments the stream states."""
     rows = conn.execute(
         f"SELECT raw_json FROM events WHERE slice_id = ? {CANONICAL_ORDER}",
         (slice_id,),
     ).fetchall()
-    return [raw_event(row["raw_json"]) for row in rows]
+    return [on_canonical_clock(raw_event(row["raw_json"])) for row in rows]
 
 
 def _slice_facts(events: list[dict], rows: list, indices: list[int]) -> tuple:

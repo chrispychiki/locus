@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import zlib
 
@@ -6,9 +7,11 @@ from locus.evidence.db import connect
 from locus.evidence.hydrate import (
     _canonical_json,
     canonical_events,
+    canonical_ts,
     event_skip_reason,
     hydrate,
     hydrate_stream,
+    on_canonical_clock,
     record_chunk_errors,
 )
 from locus.evidence.rrweb_constants import (
@@ -326,7 +329,31 @@ def test_a_counter_tie_across_page_contexts_keeps_a_total_order(tmp_path):
                     "positions": [{"x": 1}],
                 },
             },
-            "last move position has no numeric timeOffset",
+            "a move position has no numeric timeOffset",
+        ),
+        (
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 1000,
+                "counter": "1000000001",
+                "data": {
+                    "source": IncrementalSource.TouchMove,
+                    "positions": [{"x": 1}, {"x": 2, "timeOffset": 0}],
+                },
+            },
+            "a move position has no numeric timeOffset",
+        ),
+        (
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 1000,
+                "counter": "1000000001",
+                "data": {
+                    "source": IncrementalSource.Drag,
+                    "positions": ["nope", {"x": 2, "timeOffset": 0}],
+                },
+            },
+            "a move position has no numeric timeOffset",
         ),
         (
             {
@@ -339,7 +366,7 @@ def test_a_counter_tie_across_page_contexts_keeps_a_total_order(tmp_path):
         ),
     ],
 )
-def test_the_shape_gate_names_exactly_what_row_construction_touches(event, reason):
+def test_the_shape_gate_names_exactly_what_rows_and_replay_touch(event, reason):
     assert event_skip_reason(event) == reason
 
 
@@ -432,3 +459,63 @@ def test_each_flush_is_durable_and_on_flush_rides_its_transaction(tmp_path):
         "flush-1",
         "flush-2",
     ], "on_flush landed with each batch, atomically"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [IncrementalSource.MouseMove, IncrementalSource.TouchMove, IncrementalSource.Drag],
+)
+def test_a_move_batch_on_the_canonical_clock_keeps_every_positions_moment(source):
+    batch = {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": 5000,
+        "counter": "7",
+        "data": {
+            "source": source,
+            "positions": [
+                {"x": 1, "y": 2, "id": 4, "timeOffset": -480},
+                {"x": 3, "y": 4, "id": 4, "timeOffset": -250},
+                {"x": 5, "y": 6, "id": 9, "timeOffset": -130},
+            ],
+        },
+    }
+    before = copy.deepcopy(batch)
+
+    moved = on_canonical_clock(batch)
+
+    assert moved["timestamp"] == canonical_ts(batch) == 4870
+    assert [
+        moved["timestamp"] + p["timeOffset"] for p in moved["data"]["positions"]
+    ] == [batch["timestamp"] + p["timeOffset"] for p in batch["data"]["positions"]]
+    assert [
+        {k: v for k, v in p.items() if k != "timeOffset"}
+        for p in moved["data"]["positions"]
+    ] == [
+        {k: v for k, v in p.items() if k != "timeOffset"}
+        for p in batch["data"]["positions"]
+    ]
+    assert {k: v for k, v in moved.items() if k not in ("timestamp", "data")} == {
+        k: v for k, v in batch.items() if k not in ("timestamp", "data")
+    }
+    assert batch == before, "the stored event is not rewritten"
+
+
+def test_every_other_event_is_already_on_the_canonical_clock():
+    flushed_at_its_last_position = {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": 5000,
+        "data": {
+            "source": IncrementalSource.MouseMove,
+            "positions": [
+                {"x": 1, "y": 2, "id": 4, "timeOffset": -200},
+                {"x": 3, "y": 4, "id": 4, "timeOffset": 0},
+            ],
+        },
+    }
+    no_positions = {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": 5000,
+        "data": {"source": IncrementalSource.TouchMove, "positions": []},
+    }
+    for event in [*sample_events(), flushed_at_its_last_position, no_positions]:
+        assert on_canonical_clock(event) is event

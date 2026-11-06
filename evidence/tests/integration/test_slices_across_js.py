@@ -16,6 +16,7 @@ from locus.evidence.rrweb_constants import EventType, IncrementalSource, NodeTyp
 from locus.evidence.slices import (
     materialize_slices,
     rescue_orphan_slices,
+    slice_events,
     viewport_at,
     viewport_events,
 )
@@ -111,6 +112,46 @@ def test_the_viewport_at_a_moment_is_the_last_one_stated_at_or_before_it(tmp_pat
     )
     with pytest.raises(ValueError, match="no viewport"):
         viewport_at(events, 999)
+
+
+def test_a_move_batch_reaches_the_replayer_at_its_last_positions_moment(tmp_path):
+    """A move batch sent after a resize but moving before it reaches the replayer at its canonical moment, so timestamps rise in the order the replayer receives them, and the viewport read stops at the moment with the resize applied."""
+    from locus.evidence.derive import run_distill
+
+    db = tmp_path / "events.db"
+    conn = connect(db)
+    touch_moves = {
+        "type": EventType.IncrementalSnapshot,
+        "timestamp": 3200,
+        "data": {
+            "source": IncrementalSource.TouchMove,
+            "positions": [{"x": 10, "y": 10, "id": 3, "timeOffset": -400}],
+        },
+    }
+    hydrate(
+        conn,
+        "v1",
+        stamped(
+            [
+                meta(1000),
+                full_snapshot(1001),
+                touch_moves,
+                _viewport_resize(3000, 390, 663),
+            ]
+        ),
+    )
+    materialize_slices(conn, "v1")
+    conn.close()
+    run_distill(str(db))
+    conn = connect(db)
+    (slice_id,) = [row["id"] for row in conn.execute("SELECT id FROM slices")]
+
+    events = slice_events(conn, slice_id)
+    assert [event["timestamp"] for event in events][-2:] == [2800, 3000]
+    assert events[-2]["data"]["positions"] == [
+        {"x": 10, "y": 10, "id": 3, "timeOffset": 0}
+    ], "the position keeps its moment, 2800"
+    assert viewport_at(events, 3100) == (390, 663)
 
 
 def test_chained_orphans_rescue_in_sequence_gated_on_the_prior_rescues_state(tmp_path):

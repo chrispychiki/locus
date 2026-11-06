@@ -528,6 +528,55 @@ def test_a_capture_shows_the_moment_not_the_captures_before_it(tmp_path):
     assert seen == [["scrolled", 700], ["early", 0]]
 
 
+def test_a_capture_at_the_end_of_a_movement_shows_the_cursor_where_it_ended(tmp_path):
+    """The recorder sends a mouse batch after its positions, and a capture applies only what is stamped at or before its moment: the cursor stands where the movement ended from the moment it ended, as the event stream dates it."""
+    target = {
+        "type": NodeType.Element,
+        "tagName": "div",
+        "id": 4,
+        "attributes": {"style": "height: 600px"},
+        "childNodes": [],
+    }
+    conn = connect(tmp_path / "events.db")
+    synthetic(
+        conn,
+        [
+            sized_meta(1000),
+            _page_snapshot(1001, [target]),
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 2500,
+                "data": {
+                    "source": IncrementalSource.MouseMove,
+                    "positions": [
+                        {"x": 10, "y": 10, "id": 4, "timeOffset": -900},
+                        {"x": 200, "y": 150, "id": 4, "timeOffset": -500},
+                    ],
+                },
+            },
+            {
+                "type": EventType.IncrementalSnapshot,
+                "timestamp": 3000,
+                "data": {"source": IncrementalSource.Scroll, "id": 1, "x": 0, "y": 0},
+            },
+        ],
+    )
+    materialize_slices(conn, "v1")
+    row = conn.execute("SELECT id FROM slices").fetchone()
+    cursor = (
+        "() => { const m = document.querySelector('.replayer-mouse');"
+        " return [m.style.left, m.style.top]; }"
+    )
+
+    seen = []
+    with RenderSession(conn, {"S1": row["id"]}, tmp_path / "screenshots") as session:
+        for ts in (2000, 2400):
+            session.capture("S1", ts, kind="activity", size=native)
+            seen.append(session.page.evaluate(cursor))
+
+    assert seen == [["200px", "150px"], ["200px", "150px"]]
+
+
 def _resizing_slice(tmp_path):
     conn = connect(tmp_path / "events.db")
     body = {
