@@ -22,7 +22,7 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: chat_turns.install_chat_turns has the handler never compact, and refuses a request that asks it to.
 - thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
 
-Usage: locus-mlx-serve <model-slug>   (slugs are the models.toml keys)
+Usage: locus-mlx-serve <card name>   (an openai-compatible card in config/cards/)
 """
 
 import json
@@ -33,54 +33,36 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
 from urllib.parse import urlparse
-
-import tomllib
 
 from . import require_extra
 from .paths import PIDFILE
 
-MODELS_TOML = Path(__file__).parent / "models.toml"
+# The bundled server's own settings, the same for every model it serves.
+SERVER_ENV = {
+    # Thinking is the chat template's default, since analysis always thinks (each card's sampling is
+    # its vendor's thinking-mode recommendation); a request can turn it off.
+    "MLX_VLM_ENABLE_THINKING": "1",
+    # Upstream abandons a generation after 600 s without a token, and a long prefill can take longer.
+    "MLX_VLM_TOKEN_QUEUE_TIMEOUT": "3600",
+    # How many encoded image sets to keep, one per request's full set of images, so a request that
+    # re-sends the same screenshots skips encoding them (upstream keeps 20).
+    "MLX_VLM_VISION_CACHE_SIZE": "128",
+    # Upstream's prompt cache stays off; analysis/README.md § Throughput, caching, concurrency says why.
+    "APC_ENABLED": "0",
+}
 
 
-# The analysis card owns which repo a slug serves (`model`), the context it holds (`context_tokens` → MAX_KV_SIZE), and the endpoint analysis dials (`base_url` → bind host/port); the server derives all three at boot, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
-# The card is read as a file from config/cards/ under the deployment root, never through the conversation layer.
-def card_file(slug: str) -> Path:
-    from locus.analysis.model.cards import cards_dir
+# The card owns which repo the server loads (`model`), the context it holds (`context_tokens` → MAX_KV_SIZE), and the endpoint analysis dials (`base_url` → bind host/port); the server derives all three at boot, reading the card only through cards.load_card as analysis does, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
+def serving_env(name: str) -> dict[str, str]:
+    """The environment the bundled server serves the card `name` under, over what it inherits: the server's own settings (SERVER_ENV) and the card's context as MAX_KV_SIZE. The boot applies it to the server; the count (count.py) runs upstream under it, so both read the same settings."""
+    from locus.analysis.model.cards import load_card
 
-    return cards_dir() / f"{slug}.toml"
-
-
-def _card(slug: str) -> dict | None:
-    """The slug's card file, its `model` read the way analysis reads it (cards.local_model)."""
-    from locus.analysis.model.cards import local_model
-
-    path = card_file(slug)
-    if not path.exists():
-        return None
-    card = tomllib.loads(path.read_text())
-    if isinstance(card.get("model"), str):
-        card["model"] = local_model(card["model"])
-    return card
-
-
-def serving_env(slug: str) -> dict[str, str]:
-    """The environment the bundled server serves `slug` under, over what it inherits: models.toml's env for the slug and the card's context as MAX_KV_SIZE. The boot applies it to the server; the count (count.py) runs upstream under it, so both read the same settings."""
-    models = tomllib.loads(MODELS_TOML.read_text())
-    if slug not in models:
-        raise ValueError(
-            f"{slug!r} has no entry in {MODELS_TOML} — no serving env is declared "
-            f"for it, so the bundled server does not serve it"
-        )
-    card = _card(slug)
-    if card is None:
-        raise ValueError(f"no card for slug {slug!r} at {card_file(slug)}")
-    return {**models[slug]["env"], "MAX_KV_SIZE": str(card["context_tokens"])}
+    return {**SERVER_ENV, "MAX_KV_SIZE": str(load_card(name)["context_tokens"])}
 
 
 def undeclared_count_env(slug: str) -> list[str]:
-    """The count-affecting variables (count.COUNT_ENV) this process inherits that `slug`'s serving env does not declare. The count prices with the declared values alone, so a value only the server's shell held would make every price silently wrong."""
+    """The count-affecting variables (count.COUNT_ENV) this process inherits that the card `slug`'s serving env does not set. The count prices with the serving env's values alone, so a value only the server's shell held would make every price silently wrong."""
     from .count import COUNT_ENV
 
     declared = serving_env(slug)
@@ -105,28 +87,21 @@ def bind_from_card(card: dict) -> tuple[str, int]:
     return parsed.hostname, parsed.port
 
 
-def bind_for(slug: str) -> tuple[str, int]:
-    """Bind host/port for a models.toml slug, read from that slug's analysis card."""
-    card = _card(slug)
-    if card is None:
-        raise ValueError(f"no card for slug {slug!r} at {card_file(slug)}")
-    return bind_from_card(card)
+def bind_for(name: str) -> tuple[str, int]:
+    """Bind host/port for a card, read from it."""
+    from locus.analysis.model.cards import load_card
+
+    return bind_from_card(load_card(name))
 
 
 def sole_bind() -> tuple[str, int]:
-    """The unique host:port among models.toml-bootable cards.
+    """The unique host:port among the openai-compatible cards.
 
-    Probe tools and readiness checks use this when no slug is in hand: one resident model means one bind, and the card is still the owner of the number.
+    Probe tools and readiness checks use this when no card is in hand: one resident model means one bind, and the card is still the owner of the number.
     """
-    models = tomllib.loads(MODELS_TOML.read_text())
-    binds: set[tuple[str, int]] = set()
-    for slug in models:
-        card = _card(slug)
-        if card is None:
-            raise ValueError(
-                f"models.toml slug {slug!r} has no card at {card_file(slug)}"
-            )
-        binds.add(bind_from_card(card))
+    from locus.analysis.model.cards import OPENAI_COMPATIBLE, models_speaking
+
+    binds = {bind_for(name) for name in models_speaking(OPENAI_COMPATIBLE)}
     if len(binds) != 1:
         raise ValueError(
             f"bootable cards must share one bind address so probe tools can "
@@ -738,20 +713,25 @@ def install_gpu_tracking(admission: Admission) -> None:
 def main() -> None:
     require_extra("mlx.core", "mlx_vlm", "uvicorn", "pillow_heif")
     install_log_handler()
-    models = tomllib.loads(MODELS_TOML.read_text())
-    if len(sys.argv) != 2 or sys.argv[1] not in models:
+    from locus.analysis.model.cards import OPENAI_COMPATIBLE, load_card, models_speaking
+
+    if len(sys.argv) != 2:
         raise SystemExit(
-            f"usage: locus-mlx-serve <model-slug>; available: {sorted(models)}"
+            f"usage: locus-mlx-serve <card name>; openai-compatible cards: "
+            f"{models_speaking(OPENAI_COMPATIBLE)}"
         )
     slug = sys.argv[1]
+    try:
+        card = load_card(slug)
+    except ValueError as exc:
+        raise SystemExit(exc) from exc
     undeclared = undeclared_count_env(slug)
     if undeclared:
         raise SystemExit(
-            f"{', '.join(undeclared)} set in the environment and not declared for "
-            f"{slug!r} in {MODELS_TOML}: each changes how a request is counted, and "
-            f"pricing counts with the declared serving env alone (count.py), so the "
-            f"server would count differently from every price. Declare it under "
-            f'["{slug}".env] or unset it, then boot.'
+            f"{', '.join(undeclared)} set in the environment and not in the serving env "
+            f"of {slug!r} (serve.serving_env): each changes how a request is counted, and "
+            f"pricing counts with the serving env alone (count.py), so the server would "
+            f"count differently from every price. Unset it, then boot."
         )
 
     cap = _wired_cap_bytes()
@@ -760,11 +740,6 @@ def main() -> None:
     mx.set_wired_limit(cap)
     mx.set_memory_limit(cap)
 
-    card = _card(slug)
-    if card is None:
-        raise SystemExit(
-            f"no card for slug {slug!r} at {card_file(slug)} — the card owns which repo a slug serves (`model`), the context it holds (`context_tokens`), and the endpoint it dials (`base_url`); declare it there, beside this entry's serving env."
-        )
     hf_repo = card["model"]
     try:
         host, port = bind_from_card(card)
@@ -772,13 +747,13 @@ def main() -> None:
         raise SystemExit(exc) from exc
 
     os.environ["MLX_VLM_PRELOAD_MODEL"] = hf_repo
-    # The declarations — models.toml's env and the card's KV budget — beat an inherited shell
-    # value, loudly. An override is applied by editing the declaration.
+    # The serving env — SERVER_ENV and the card's KV budget — beats an inherited shell value,
+    # loudly. To override, edit the card or SERVER_ENV.
     for key, value in serving_env(slug).items():
         inherited = os.environ.get(key)
         if inherited is not None and inherited != value:
             logger.warning(
-                f"{key}={inherited!r} in the environment; the declaration says {value!r} and wins"
+                f"{key}={inherited!r} in the environment; the serving env says {value!r} and wins"
             )
         os.environ[key] = value
 

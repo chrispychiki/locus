@@ -2,7 +2,7 @@
 
 Three levels of proof: reception (prompt_tokens reflect vision tokens), tokenization (accounting stays stable across cache hits), and semantics (the model states visual facts — counts, colors, positions — that exist only in pixels).
 
-Requires the server (uv run locus-mlx-serve <models.toml key>) on the card's endpoint; every test skips when it isn't there. Fixtures are drawn with PIL at test time — nothing binary is committed.
+Requires the server (uv run locus-mlx-serve <card name>) on the card's endpoint; every test skips when it isn't there. Fixtures are drawn with PIL at test time — nothing binary is committed.
 
 Contract notes for the upstream server: thinking arrives as `reasoning` (not `reasoning_content`); rich per-request stats live in `timings`, not usage extensions; images travel as plain absolute paths (upstream does not parse file:// for images); structured output is llguidance via response_format json_schema.
 """
@@ -341,7 +341,7 @@ def test_reads_ui_scale_text_from_screenshot(tmp_path):
 
 
 def test_generation_speed_floor():
-    """The floor is on the server's own decode rate for this request (timings.predicted_per_second), never on client wall clock: the server is shared, so wall time includes unbounded admission-queue and prefill-serialization wait, and a healthy server queued behind a large window would read as crawling. Decode sharing is the one contention that survives into the measurement, and the admission cap (models.toml) bounds it to one concurrent stream — measured 4.5 tok/s beside a 210k-context decode, still above this floor — so a reading below it is pathology (lockstep decode, compression thrash), not load."""
+    """The floor is on the server's own decode rate for this request (timings.predicted_per_second), never on client wall clock: the server is shared, so wall time includes unbounded admission-queue and prefill-serialization wait, and a healthy server queued behind a large window would read as crawling. The server admits one request at a time, so nothing shares this request's decode, and a reading below the floor is pathology (compression thrash), not load."""
     response = chat(
         [{"role": "user", "content": "Write one sentence about coffee."}],
         enable_thinking=False,

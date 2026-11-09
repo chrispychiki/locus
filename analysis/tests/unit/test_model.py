@@ -521,7 +521,6 @@ def test_local_cards_declare_family_image_tokens_and_endpoint():
 
 def test_a_relative_model_directory_is_the_deployment_roots(tmp_path, monkeypatch):
     """A card naming a local directory by relative path names it under the deployment root its roster lives in, whatever the working directory — the one reading the server boots from and the count resolves by; a name no directory answers to is a Hub repo id, as upstream reads it."""
-    from locus.analysis.mlx import serve
     from locus.analysis.model import cards
 
     root = tmp_path / "deployment"
@@ -545,8 +544,6 @@ def test_a_relative_model_directory_is_the_deployment_roots(tmp_path, monkeypatc
     assert load_card("local")["model"] == local
     assert cards.model_id("local") == local, "every reader takes the resolved model"
     assert load_card("hub")["model"] == "someone/hub-qwen"
-    monkeypatch.setattr(serve, "card_file", lambda slug: roster / f"{slug}.toml")
-    assert serve._card("local")["model"] == local, "the server reads the same model"
 
     (roster / "again.toml").write_text(f'model = "{local}"\n{body}')
     with pytest.raises(ValueError, match="same model"):

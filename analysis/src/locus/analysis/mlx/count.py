@@ -49,7 +49,7 @@ EXPECTED_LOAD_IMAGE_SHA256 = (
 # Every environment variable the count's upstream steps read that can change a count, by the
 # reader it reaches upstream through: the image pixel limits (also in the runtime config), the
 # thinking defaults the chat template receives, and the processor-load arguments. A server and a
-# count must read the same values for these, so both take them from the declared serving env alone
+# count must read the same values for these, so both take them from the serving env alone
 # (serve.serving_env): the count clears any it inherits, and the server refuses to boot on one.
 COUNT_ENV = {
     "MLX_VLM_MIN_PIXELS": "get_server_min_pixels",
@@ -184,7 +184,7 @@ def _slug(model: str) -> str:
 
 @contextmanager
 def _serving(model: str):
-    """Upstream run under the environment the bundled server serves `model` under (serve.serving_env): every setting upstream reads from the environment, its runtime config included, is the server's for the duration — a count-affecting variable the declaration leaves out is cleared, as the server will not boot with one (COUNT_ENV) — and this process's own is back after."""
+    """Upstream run under the environment the bundled server serves `model` under (serve.serving_env): every setting upstream reads from the environment, its runtime config included, is the server's for the duration — a count-affecting variable the serving env leaves out is cleared, as the server will not boot with one (COUNT_ENV) — and this process's own is back after."""
     from mlx_vlm.server import runtime_config
     from mlx_vlm.server.runtime import runtime
 

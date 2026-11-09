@@ -4,7 +4,7 @@
 # this owns only the mechanics: launch, log placement, readiness.
 set -eu
 
-[ $# -eq 1 ] || { echo "usage: start-server.sh <model-slug>   (slugs are the models.toml keys)" >&2; exit 1; }
+[ $# -eq 1 ] || { echo "usage: start-server.sh <card name>   (an openai-compatible card in config/cards/)" >&2; exit 1; }
 
 # The package root the server runs from; the venv is the workspace's, above it. Where the server
 # writes — the machine-level pidfile, the serve log under the deployment's data/ — is paths.py's.
@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$ROOT/../.venv/bin/python"
 # Everything below resolves against this script's own clone, whatever the caller's cwd.
 cd "$ROOT"
-# Host and port come from the slug's analysis card (base_url) — the same derivation boot uses.
+# Host and port come from the card's base_url — the same derivation boot uses.
 HOST="$("$PY" -c "from locus.analysis.mlx.serve import bind_for; print(bind_for('$1')[0])")"
 PORT="$("$PY" -c "from locus.analysis.mlx.serve import bind_for; print(bind_for('$1')[1])")"
 PIDFILE="$("$PY" -c 'from locus.analysis.mlx.paths import PIDFILE; print(PIDFILE)')"

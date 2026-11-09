@@ -1315,32 +1315,6 @@ class TestHeifDecode:
 
 
 class TestCardDerivation:
-    def test_every_serveable_slug_derives_its_card(self):
-        """The analysis card owns which repo a slug serves, the context it
-        holds, and the endpoint it dials; models.toml carries only serving env.
-        A slug with env but no card cannot boot, and a restated repo, KV budget,
-        or port here would be the drift this split exists to make impossible."""
-        import tomllib
-        from locus.analysis.mlx.serve import MODELS_TOML, _card, bind_from_card
-
-        models = tomllib.loads(MODELS_TOML.read_text())
-        assert models, "no serveable slug declared"
-        for slug, entry in models.items():
-            card = _card(slug)
-            assert card is not None, (
-                f"{slug} declares serving env but no card owns its facts"
-            )
-            assert card["model"] and card["context_tokens"] > 0
-            host, port = bind_from_card(card)
-            assert host and port > 0
-            assert "hf_repo" not in entry, f"{slug} restates the repo the card owns"
-            assert "MAX_KV_SIZE" not in entry.get("env", {}), (
-                f"{slug} restates the KV budget the card owns"
-            )
-            assert "LOCUS_MLX_ADMISSION_CAP" not in entry.get("env", {}), (
-                f"{slug} declares a request count as admission; admission is the prefill slot and the measured KV budget"
-            )
-
     def test_bind_from_card_parses_host_and_port(self):
         from locus.analysis.mlx.serve import bind_from_card
 
@@ -1358,21 +1332,21 @@ class TestCardDerivation:
             bind_from_card({"base_url": "http://127.0.0.1/v1"})
 
     def test_sole_bind_matches_every_bootable_card(self):
-        import tomllib
-        from locus.analysis.mlx.serve import MODELS_TOML, bind_for, sole_bind
+        from locus.analysis.mlx.serve import bind_for, sole_bind
+        from locus.analysis.model.cards import OPENAI_COMPATIBLE, models_speaking
 
         sole = sole_bind()
-        for slug in tomllib.loads(MODELS_TOML.read_text()):
-            assert bind_for(slug) == sole
+        for name in models_speaking(OPENAI_COMPATIBLE):
+            assert bind_for(name) == sole
 
 
 def test_the_boot_refuses_a_count_setting_only_its_shell_holds(monkeypatch):
-    """A count-affecting variable the server would inherit but models.toml does not declare refuses the boot before anything is loaded: pricing counts with the declared serving env alone, so the server would count differently from every price. A declared one is the declaration's, and boots."""
+    """A count-affecting variable the server would inherit but its serving env does not set refuses the boot before anything is loaded: pricing counts with the serving env alone, so the server would count differently from every price. A variable the serving env sets boots, and the serving env's value wins."""
     from locus.analysis.mlx import serve
 
     slug = "qwen3.6-35b-a3b-6bit"
     monkeypatch.setenv("MLX_VLM_ENABLE_THINKING", "0")
-    assert serve.undeclared_count_env(slug) == [], "declared: the declaration wins"
+    assert serve.undeclared_count_env(slug) == [], "set by the serving env, which wins"
 
     monkeypatch.setenv("MLX_VLM_MAX_PIXELS", "65536")
     monkeypatch.setattr(serve, "install_log_handler", lambda: None)
@@ -1395,12 +1369,13 @@ def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
         presence_penalty,
         vision_chunking,
     )
+    from locus.analysis.model.cards import load_card
     from mlx_vlm.server import app as server_app
 
     slug = "qwen3.6-35b-a3b-6bit"
     for key, value in serve.serving_env(slug).items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setenv("MLX_VLM_PRELOAD_MODEL", serve._card(slug)["model"])
+    monkeypatch.setenv("MLX_VLM_PRELOAD_MODEL", load_card(slug)["model"])
     installed = []
 
     def recording(name):

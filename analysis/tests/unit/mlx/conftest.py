@@ -20,19 +20,3 @@ if _missing:
         stacklevel=1,
     )
     collect_ignore_glob = ["*.py"]
-
-
-if not _missing:
-    from pathlib import Path
-
-    import pytest
-
-    @pytest.fixture(autouse=True)
-    def shipped_serve_cards(monkeypatch):
-        """The server reads its card from config/cards/ under the deployment root, resolved from cwd — and the suite runs chdir'd off the clone, so pin the read to the repo's shipped roster."""
-        from locus.analysis.mlx import serve
-
-        root = Path(__file__).resolve().parents[4]
-        monkeypatch.setattr(
-            serve, "card_file", lambda slug: root / "config" / "cards" / f"{slug}.toml"
-        )

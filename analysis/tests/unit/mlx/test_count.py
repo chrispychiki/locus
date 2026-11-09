@@ -159,7 +159,7 @@ def test_mixed_sizes_count_as_the_server_processes_them_together(tmp_path):
 
 
 def test_the_count_runs_under_the_servers_declared_env(tmp_path, monkeypatch):
-    """What models.toml declares for the server is what the count runs under — here a pixel cap the server would read from its env — and this process's own env is untouched after."""
+    """The count runs under the serving env (serve.serving_env) — here a pixel cap the server would read from its env — and leaves this process's own env untouched."""
     import os
 
     from locus.analysis.mlx import serve
@@ -182,7 +182,7 @@ def test_the_count_runs_under_the_servers_declared_env(tmp_path, monkeypatch):
         lambda slug: {**declared(slug), "MLX_VLM_MAX_PIXELS": str(256 * 256)},
     )
     capped = count.prompt_tokens(request)
-    assert capped < uncapped, "the declared cap shrank the image"
+    assert capped < uncapped, "the serving env's cap shrank the image"
     assert capped == _all_at_once(request)
     assert "MLX_VLM_MAX_PIXELS" not in os.environ
 
@@ -204,7 +204,7 @@ def test_the_models_files_are_found_without_the_network(monkeypatch):
 
 
 def test_a_count_setting_only_this_shell_holds_is_not_read(tmp_path, monkeypatch):
-    """The server will not boot with a count-affecting variable its declaration leaves out, so the count does not read one either: an inherited pixel cap changes nothing, and is still set after."""
+    """The server will not boot with a count-affecting variable its serving env leaves out, so the count does not read one either: an inherited pixel cap changes nothing, and is still set after."""
     import os
 
     path = tmp_path / "big.png"
