@@ -42,20 +42,12 @@ def test_a_missing_script_is_named(fake_root):
 
 
 def test_an_install_that_cannot_see_the_assets_says_so(tmp_path, monkeypatch):
-    monkeypatch.setattr(assets, "__file__", str(tmp_path / "a" / "b" / "assets.py"))
+    monkeypatch.setattr(
+        assets, "__file__", str(tmp_path / "src" / "locus" / "evidence" / "assets.py")
+    )
+    (tmp_path / "distill").mkdir()
     with pytest.raises(FileNotFoundError, match="cannot see its non-Python assets"):
         assets.vendored("rrweb-replay-*.min.js")
-
-
-def test_assets_beside_the_package_resolve(tmp_path, monkeypatch):
-    # A wheel carries distill/ and vendor/ inside the package; the editable clone leaves them
-    # at the evidence root. One search rule has to find both, or a shipped wheel is a lie.
-    package = tmp_path / "site-packages" / "locus" / "evidence"
-    (package / "distill").mkdir(parents=True)
-    (package / "vendor").mkdir()
-    (package / "distill" / "distill.js").write_text("x")
-    monkeypatch.setattr(assets, "__file__", str(package / "assets.py"))
-    assert assets.script("distill.js") == package / "distill" / "distill.js"
 
 
 def test_the_real_clone_resolves():

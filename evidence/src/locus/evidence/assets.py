@@ -1,20 +1,19 @@
 """The evidence package's non-Python assets: the bun scripts under distill/ and the vendored rrweb player under vendor/.
 
-One rule finds them either way the package is installed: the nearest directory at or above this module holding both. A wheel carries them inside the package (pyproject's wheel `only-include` and its `sources` remap); an editable install from the clone leaves them at the evidence root. An install that can see neither fails loud rather than shelling out to a path that does not exist.
+They sit at the evidence root of the clone the package is installed from in editable mode. An install that cannot see both there fails loud rather than shelling out to a path that does not exist.
 """
 
 from pathlib import Path
 
 
 def _evidence_root() -> Path:
-    module = Path(__file__).resolve()
-    for candidate in (module.parent, *module.parents):
-        if (candidate / "distill").is_dir() and (candidate / "vendor").is_dir():
-            return candidate
-    raise FileNotFoundError(
-        f"locus cannot see its non-Python assets (distill/, vendor/) anywhere "
-        f"at or above {module.parent} — reinstall locus-evidence"
-    )
+    root = Path(__file__).resolve().parents[3]
+    if not ((root / "distill").is_dir() and (root / "vendor").is_dir()):
+        raise FileNotFoundError(
+            f"locus cannot see its non-Python assets (distill/, vendor/) at {root}: "
+            "locus-evidence runs from its clone, installed by ./install.sh from the deployment root"
+        )
+    return root
 
 
 def script(name: str) -> Path:

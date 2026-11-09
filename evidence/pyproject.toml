@@ -27,19 +27,7 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# The package shells into the bun distillation scripts and reads the vendored rrweb player, so a
-# wheel without them installs code whose load/distill/replay cannot run. They ride inside the
-# package; assets.py finds them there, or at the evidence root in an editable install. The bun
-# package manifest and its installed modules stay out: the distillation scripts import only each
-# other and bun's own builtins, and only the constants generator (a development tool) needs the
-# npm packages.
+# distill/ and vendor/ stay out of the wheel: distillation imports distill/'s npm packages, so
+# locus-evidence runs from its clone, where assets.py finds both.
 [tool.hatch.build.targets.wheel]
-only-include = ["src/locus", "distill", "vendor"]
-exclude = ["distill/node_modules", "distill/package.json",
-           "distill/bun.lock", "distill/bunfig.toml",
-           "distill/extract_rrweb_constants.js"]
-
-[tool.hatch.build.targets.wheel.sources]
-"src/locus" = "locus"
-"distill" = "locus/evidence/distill"
-"vendor" = "locus/evidence/vendor"
+packages = ["src/locus"]

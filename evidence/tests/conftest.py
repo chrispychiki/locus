@@ -21,5 +21,6 @@ def pytest_configure(config):
     """
     if hasattr(config, "workerinput"):
         return
-    # distill/'s npm packages: the constants generator resolves @rrweb/types and rrweb out of them.
+    # distill/'s npm packages: distillation imports aria-query out of them, and the two
+    # generator scripts import the rest.
     bun_install(EVIDENCE / "distill")
