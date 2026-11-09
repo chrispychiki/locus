@@ -1317,6 +1317,14 @@ class TestHeifDecode:
 
 
 class TestCardDerivation:
+    def test_gemmas_card_states_its_channel_markers(self):
+        from locus.analysis.mlx.serve import serving_env
+
+        env = serving_env("gemma-4-26b-a4b-6bit")
+        assert env["MLX_VLM_THINKING_START_TOKEN"] == "<|channel>"
+        assert env["MLX_VLM_THINKING_END_TOKEN"] == "<channel|>"
+        assert "MLX_VLM_THINKING_START_TOKEN" not in serving_env("qwen3.6-35b-a3b-6bit")
+
     def test_bind_from_card_parses_host_and_port(self):
         from locus.analysis.mlx.serve import bind_from_card
 
@@ -1381,9 +1389,9 @@ serve.main()
 """
 
 
-def test_the_boot_reads_the_encode_cap_and_installs_every_patch_for_real():
-    """The boot in a process of its own, every patch installed and the encode cap read through the count, the model's files from this machine's Hugging Face cache; only the GPU limits and serving are stubbed. The count verifies upstream's unpatched source, so a patch applied before the cap is read refuses this boot."""
-    slug = "qwen3.6-35b-a3b-6bit"
+@pytest.mark.parametrize("slug", ["qwen3.6-35b-a3b-6bit", "gemma-4-26b-a4b-6bit"])
+def test_the_boot_reads_the_encode_cap_and_installs_every_patch_for_real(slug):
+    """The boot in a process of its own, every patch the card's family needs installed and the encode cap read through the count, the model's files (and Gemma 4's canonical template) from this machine's Hugging Face cache; only the GPU limits and serving are stubbed. The count verifies upstream's unpatched source, so a patch applied before the cap is read refuses this boot, as does a patch whose own source check finds another patch already applied."""
     env = {**os.environ, **serve.serving_env(slug), "HF_HUB_OFFLINE": "1"}
     done = subprocess.run(
         [sys.executable, "-c", BOOT_UNTIL_SERVING, slug],
@@ -1398,21 +1406,58 @@ def test_the_boot_reads_the_encode_cap_and_installs_every_patch_for_real():
     assert done.stdout.strip().endswith("serving")
 
 
-def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
-    """Each patch is proven where it lives; this proves the boot runs every one of them before the server takes a request, so a dropped install call cannot pass the suite."""
+def test_every_supported_family_has_its_patches():
+    from locus.analysis.model.cards import SUPPORTED_FAMILIES
+
+    assert set(serve.FAMILY_PATCHES) == SUPPORTED_FAMILIES
+
+
+COMMON_PATCHES = {
+    "install_heif_decode",
+    "install_preprocess_serializer",
+    "install_pixel_release",
+    "install_prompt_recording",
+    "install_gpu_tracking",
+    "install_presence_penalty",
+    "install_chat_turns",
+}
+
+
+@pytest.mark.parametrize(
+    ("slug", "family_patches"),
+    [
+        (
+            "qwen3.6-35b-a3b-6bit",
+            {"qwen3.install_vision_encode_chunking", "qwen3.install_fused_attention"},
+        ),
+        (
+            "gemma-4-26b-a4b-6bit",
+            {
+                "gemma4.install_processor_contract",
+                "gemma4.install_reasoning_markers",
+                "gemma4.install_vision_encode_chunking",
+                "gemma4.install_image_aligned_prefill",
+            },
+        ),
+    ],
+)
+def test_the_boot_installs_every_patch_before_it_serves(
+    monkeypatch, slug, family_patches
+):
+    """Each patch is proven where it lives; this proves the boot runs every one the served family needs, and none of the other family's, before the server takes a request, so a dropped install call cannot pass the suite."""
     import mlx.core as mx
     import mlx_vlm.utils as mlx_utils
     from locus.analysis.mlx import (
         chat_turns,
         count,
         fused_attention,
+        gemma4,
         presence_penalty,
         vision_chunking,
     )
     from locus.analysis.model.cards import load_card
     from mlx_vlm.server import app as server_app
 
-    slug = "qwen3.6-35b-a3b-6bit"
     for key, value in serve.serving_env(slug).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("MLX_VLM_PRELOAD_MODEL", load_card(slug)["model"])
@@ -1427,13 +1472,20 @@ def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
         (serve, "install_pixel_release"),
         (serve, "install_prompt_recording"),
         (serve, "install_gpu_tracking"),
-        (vision_chunking, "install_vision_encode_chunking"),
-        (fused_attention, "install_fused_attention"),
         (presence_penalty, "install_presence_penalty"),
         (chat_turns, "install_chat_turns"),
         (serve, "serve_guarded"),
     ]:
         monkeypatch.setattr(module, name, recording(name))
+    for family, module, name in [
+        ("qwen3", vision_chunking, "install_vision_encode_chunking"),
+        ("qwen3", fused_attention, "install_fused_attention"),
+        ("gemma4", gemma4, "install_processor_contract"),
+        ("gemma4", gemma4, "install_reasoning_markers"),
+        ("gemma4", gemma4, "install_vision_encode_chunking"),
+        ("gemma4", gemma4, "install_image_aligned_prefill"),
+    ]:
+        monkeypatch.setattr(module, name, recording(f"{family}.{name}"))
     monkeypatch.setattr(serve, "install_log_handler", lambda: None)
     monkeypatch.setattr(serve, "_wired_cap_bytes", lambda: 2**30)
     monkeypatch.setattr(mx, "set_wired_limit", lambda cap: None)
@@ -1446,14 +1498,4 @@ def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
     serve.main()
 
     assert installed[-1] == "serve_guarded"
-    assert set(installed[:-1]) == {
-        "install_heif_decode",
-        "install_preprocess_serializer",
-        "install_pixel_release",
-        "install_prompt_recording",
-        "install_gpu_tracking",
-        "install_vision_encode_chunking",
-        "install_fused_attention",
-        "install_presence_penalty",
-        "install_chat_turns",
-    }
+    assert set(installed[:-1]) == COMMON_PATCHES | family_patches

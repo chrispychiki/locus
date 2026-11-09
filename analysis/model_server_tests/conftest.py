@@ -1,8 +1,10 @@
-"""The suite that needs the running model server: the bundled mlx server at the card's endpoint.
+"""The suite that needs the running model server: the bundled mlx server at the local cards' endpoint.
 
-It runs only when this directory is named: `uv run pytest model_server_tests` from analysis/. Every test skips with a reason when mlx cannot run on the machine (it needs Apple silicon under macOS) or when the server is not up.
+It runs only when this directory is named: `uv run pytest model_server_tests` from analysis/. Every test runs against whichever local model the server holds, and skips with a reason when mlx cannot run on the machine (it needs Apple silicon under macOS) or when the server is not up; a test marked `family` runs only while the server holds a model of that family. The server records only its latest request's rendered prompt, so a test marked `reads_rendering` runs while no other test of the suite runs, on any worker.
 """
 
+import fcntl
+import json
 import platform
 import sys
 import urllib.request
@@ -31,32 +33,74 @@ def _unservable_platform() -> str | None:
     return f"mlx runs only on Apple silicon under macOS; this machine is {platform.system()} on {platform.machine()}"
 
 
-def _mlx_ready() -> bool:
-    """Is the local server up? Asked at the address the backend actually dials, read from the card — the card is the one home for the endpoint, so a second copy here could go stale and skip (or run) these tests against a server that is not the one analysis talks to. An address that will not answer is the not-running verdict; anything else — a card whose base_url is not a URL — is a broken configuration and fails loud."""
-    from locus.analysis.model.cards import OPENAI_COMPATIBLE, load_card, models_speaking
+def _served_card() -> str | None:
+    """The card whose model the local server holds, or None when no server answers. Asked at the address every local card's base_url names (serve.sole_bind), so these tests run against the server analysis talks to. A server holding a model no card declares fails loud."""
+    from locus.analysis.mlx.serve import sole_bind
+    from locus.analysis.model.cards import OPENAI_COMPATIBLE, model_id, models_speaking
 
-    models = models_speaking(OPENAI_COMPATIBLE)
-    if not models:
-        return False
-    base = load_card(models[0])["base_url"]
-    health = base.removesuffix("/v1") + "/health"
+    host, port = sole_bind()
     try:
-        with urllib.request.urlopen(health, timeout=2) as resp:
-            return b"loaded_model" in resp.read()
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as resp:
+            loaded = json.loads(resp.read()).get("loaded_model")
     except OSError:
-        return False
+        return None
+    if not loaded:
+        return None
+    for name in models_speaking(OPENAI_COMPATIBLE):
+        if model_id(name) == loaded:
+            return name
+    raise RuntimeError(f"the local server holds {loaded}, which no card declares")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "family(name): runs only while the local server holds a model of that card family",
+    )
+    config.addinivalue_line(
+        "markers",
+        "reads_rendering: reads the server's record of the latest request's rendered prompt, "
+        "so runs while no other test of the suite does",
+    )
+
+
+@pytest.fixture(autouse=True)
+def rendering_record_held(request, tmp_path_factory):
+    """Every test holds the lock shared and a test reading the rendering holds it alone, so no request of another test lands between its own request and its read. The lock file is in the parent of each worker's temp directory, which all workers share."""
+    alone = request.node.get_closest_marker("reads_rendering") is not None
+    with open(tmp_path_factory.getbasetemp().parent / "rendering.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if alone else fcntl.LOCK_SH)
+        yield
+
+
+@pytest.fixture(scope="session")
+def served_card() -> str:
+    """The name of the card whose model the local server holds."""
+    return _served_card()
 
 
 def pytest_collection_modifyitems(config, items):
+    from locus.analysis.model.cards import OPENAI_COMPATIBLE, load_card, models_speaking
+
+    here = [i for i in items if Path(i.path).is_relative_to(Path(__file__).parent)]
     reason = _unservable_platform()
-    if reason is None and not _mlx_ready():
-        reason = (
-            "the bundled mlx server is not running — boot it with "
-            "`uv run locus-mlx-serve qwen3.6-35b-a3b-6bit` (free, local weights)"
-        )
+    served = None
     if reason is None:
-        return
-    skip = pytest.mark.skip(reason=reason)
-    for item in items:
-        if Path(item.path).is_relative_to(Path(__file__).parent):
-            item.add_marker(skip)
+        served = _served_card()
+        if served is None:
+            reason = (
+                "the bundled mlx server is not running — boot it on a local card "
+                f"({', '.join(models_speaking(OPENAI_COMPATIBLE))}) with "
+                "`uv run locus-mlx-serve <card name>` (free, local weights)"
+            )
+    for item in here:
+        if reason is not None:
+            item.add_marker(pytest.mark.skip(reason=reason))
+            continue
+        family = item.get_closest_marker("family")
+        if family is not None and family.args[0] != load_card(served)["family"]:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=f"a {family.args[0]} test; the server holds {served}"
+                )
+            )

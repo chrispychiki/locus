@@ -34,20 +34,16 @@ EXPECTED_CALL_SHA256 = (
 )
 
 
-def chunk_rows(rows, patch_pixels, budget_pixels):
-    """Partition grid rows [(t, h, w), ...] into contiguous groups whose source-pixel sum
-    (t*h*w patches × patch_pixels each) stays within the budget. A row is never split; a single
-    row over the budget forms its own group. Returns [(start, end), ...] half-open index pairs
-    covering every row in order."""
+def image_groups(pixels: list[int], budget: float) -> list[tuple[int, int]]:
+    """Contiguous half-open (start, end) groups of images whose pixel sum stays within the budget; an image is never split, and one over the budget forms its own group."""
     groups = []
     start, used = 0, 0
-    for i, (t, h, w) in enumerate(rows):
-        pixels = t * h * w * patch_pixels
-        if i > start and used + pixels > budget_pixels:
+    for i, count in enumerate(pixels):
+        if i > start and used + count > budget:
             groups.append((start, i))
             start, used = i, 0
-        used += pixels
-    groups.append((start, len(rows)))
+        used += count
+    groups.append((start, len(pixels)))
     return groups
 
 
@@ -77,7 +73,7 @@ def install_vision_encode_chunking(budget: int) -> None:
             return original(self, hidden_states, grid_thw, **kwargs)
         rows = [tuple(int(v) for v in row) for row in grid_thw.tolist()]
         patch_pixels = self.patch_embed.patch_size**2
-        groups = chunk_rows(rows, patch_pixels, budget)
+        groups = image_groups([t * h * w * patch_pixels for t, h, w in rows], budget)
         if len(groups) == 1:
             return original(self, hidden_states, grid_thw, **kwargs)
 

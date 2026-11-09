@@ -6,9 +6,9 @@ its citations validated mechanically with a repair turn only on violation.
 Measurement (the oracle) is a separate concern, so this verifies the engine's own
 output — a cited answer, its screenshots, its provenance — and stops there.
 
-Gated on the bundled mlx server (free, local weights, screenshots handed over as file
-paths); the identical wiring runs on Gemini but spends money, so the free local run
-is the one in the suite. Server down → the test skips with the boot command.
+Gated on the bundled mlx server, run on whichever local model it holds (free, local
+weights, screenshots handed over as file paths); the identical wiring runs on Gemini
+but spends money, so the free local run is the one in the suite. Server down → the test skips with the boot command.
 """
 
 import json
@@ -19,12 +19,11 @@ from _support import best_slice
 from locus.analysis import engine
 from locus.evidence.db import connect
 
-MLX_MODEL = "qwen3.6-35b-a3b-6bit"
 CONTEXT = "a demo session recorded for the test fixture."
 QUESTION = "What was this visitor doing in this session, and did anything visibly go wrong for them? Cite the moments."
 
 
-def test_engine_against_local_model(distilled_db, tmp_path):
+def test_engine_against_local_model(distilled_db, tmp_path, served_card):
     conn = connect(distilled_db)
     slice_id = best_slice(conn)
     out = tmp_path / "run"
@@ -36,14 +35,14 @@ def test_engine_against_local_model(distilled_db, tmp_path):
         conn,
         window,
         question=QUESTION,
-        model=MLX_MODEL,
+        model=served_card,
         site_contexts={"site": CONTEXT},
     )
     manifest = engine.run_analysis(
         conn,
         window,
         question=QUESTION,
-        model=MLX_MODEL,
+        model=served_card,
         site_contexts={"site": CONTEXT},
         out_dir=engine.home_analysis(out),
     )
@@ -74,7 +73,7 @@ def test_engine_against_local_model(distilled_db, tmp_path):
     )
 
 
-def test_engine_multi_slice_window(distilled_db, tmp_path):
+def test_engine_multi_slice_window(distilled_db, tmp_path, served_card):
     """A multi-slice window through a real model: two labeled slices
     on one shared clock, every pushed and pulled screenshot addressed by label, one
     answer out, citing by slice label and offset."""
@@ -94,7 +93,7 @@ def test_engine_multi_slice_window(distilled_db, tmp_path):
         conn,
         resolve_window(conn, slice_ids),
         question=QUESTION,
-        model=MLX_MODEL,
+        model=served_card,
         site_contexts={"site": CONTEXT},
         out_dir=engine.home_analysis(out),
     )

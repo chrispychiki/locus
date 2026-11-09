@@ -12,7 +12,7 @@ import locus.analysis.mlx.vision_chunking as vc
 import mlx.core as mx
 import pytest
 from locus.analysis.mlx.vision_chunking import (
-    chunk_rows,
+    image_groups,
     install_vision_encode_chunking,
 )
 from mlx_vlm.models.qwen3_vl.config import VisionConfig
@@ -28,33 +28,26 @@ def restore_call():
     VisionModel.__call__ = original
 
 
-class TestChunkRows:
+class TestImageGroups:
     def test_everything_under_budget_is_one_group(self):
-        rows = [(1, 4, 4), (1, 4, 4)]
-        assert chunk_rows(rows, PATCH_PIXELS, 1e9) == [(0, 2)]
+        assert image_groups([4096, 4096], 1e9) == [(0, 2)]
 
-    def test_splits_at_row_boundaries_when_budget_fills(self):
-        # Each row is 1*8*8*256 = 16384 px; budget fits exactly two.
-        rows = [(1, 8, 8)] * 5
-        assert chunk_rows(rows, PATCH_PIXELS, 2 * 16384) == [(0, 2), (2, 4), (4, 5)]
+    def test_splits_at_image_boundaries_when_budget_fills(self):
+        assert image_groups([16384] * 5, 2 * 16384) == [(0, 2), (2, 4), (4, 5)]
 
-    def test_a_single_row_over_budget_encodes_alone(self):
-        rows = [(1, 4, 4), (1, 100, 100), (1, 4, 4)]
-        groups = chunk_rows(rows, PATCH_PIXELS, 5000)
-        assert groups == [(0, 1), (1, 2), (2, 3)]
+    def test_a_single_image_over_budget_encodes_alone(self):
+        assert image_groups([4096, 2_560_000, 4096], 5000) == [(0, 1), (1, 2), (2, 3)]
 
-    def test_rows_are_never_split_and_order_is_preserved(self):
-        rows = [(1, 6, 6), (2, 8, 4), (1, 2, 2), (1, 10, 10)]
-        groups = chunk_rows(rows, PATCH_PIXELS, 20000)
+    def test_images_are_never_split_and_order_is_preserved(self):
+        groups = image_groups([9216, 16384, 1024, 25600], 20000)
         assert groups[0][0] == 0
-        assert groups[-1][1] == len(rows)
+        assert groups[-1][1] == 4
         for (a, b), (c, d) in itertools.pairwise(groups):
             assert b == c
             assert a < b and c < d
 
     def test_exact_fit_stays_in_one_group(self):
-        rows = [(1, 8, 8), (1, 8, 8)]
-        assert chunk_rows(rows, PATCH_PIXELS, 2 * 16384) == [(0, 2)]
+        assert image_groups([16384, 16384], 2 * 16384) == [(0, 2)]
 
 
 class TestInstall:
@@ -145,7 +138,7 @@ class TestOutputIdentity:
         def never(*args, **kwargs):
             raise AssertionError("single-image call consulted the chunker")
 
-        monkeypatch.setattr(vc, "chunk_rows", never)
+        monkeypatch.setattr(vc, "image_groups", never)
         merged, deep = model(pixels, grid)
 
         assert mx.allclose(merged, merged_ref, atol=1e-6, rtol=1e-6)

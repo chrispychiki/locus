@@ -1,6 +1,6 @@
 """The bundled server's own prompt count, run in this process without the server.
 
-A chat-completions request's prompt_tokens is decided on the CPU before the GPU sees anything: upstream renders the model's chat template over the request and runs the model's processor over it and its images (server/openai.py chat_completions_endpoint into server/generation.py _cpu_preprocess). prompt_tokens() runs those same steps through upstream's own functions, as the server patches them (chat_turns.py), on the model's processor and config loaded without its weights, under the environment the server serves the model under (serve.serving_env), so a local card's count is the server's count by construction — offline, nothing booted, no copy of the template, the tokenizer or the image arithmetic kept here. Where the server preprocesses a request's images all at once, the count takes each distinct image size once (prompt_tokens says why that is the same number), so what it holds does not grow with the number of images.
+A chat-completions request's prompt_tokens is decided on the CPU before the GPU sees anything: upstream renders the model's chat template over the request and runs the model's processor over it and its images (server/openai.py chat_completions_endpoint into server/generation.py _cpu_preprocess). prompt_tokens() runs those same steps through upstream's own functions, as the server patches them (chat_turns.py, and gemma4.py for a Gemma 4 card), on the model's processor and config loaded without its weights, under the environment the server serves the model under (serve.serving_env), so a local card's count is the server's count by construction — offline, nothing booted, no copy of the template, the tokenizer or the image arithmetic kept here. Where the server preprocesses a request's images all at once, the count takes each distinct image size once (prompt_tokens says why that is the same number), so what it holds does not grow with the number of images.
 
 The steps follow upstream's chat handler, load and preprocessing, and the shortcut and the sizing (grid, processed_size, pixel_limit) rest on the model's processor, so all are pinned to their source like every upstream-keyed patch (patching.py): a changed source refuses until the steps are re-checked against it.
 """
@@ -76,12 +76,19 @@ EXPECTED_RUNTIME_FROM_ENV_SHA256 = (
     "0fc298c17e9000877f49886dafb69b2181e44b0918d0463fe3c560bf129e5db7"
 )
 
-# The processors the per-image shortcut and the sizing have been judged on, by module: each
-# expands an image's placeholder from that image's own grid alone, and sizes every image by its
-# image processor's _resolved_size onto cells of patch_size x merge_size.
+# The processor module the per-image shortcut and the sizing have been judged on for each card
+# family, with its judged source: each expands an image's placeholder from that image's own size
+# alone. Qwen3-VL's sizes every image by its image processor's _resolved_size onto cells of
+# patch_size x merge_size; Gemma 4's, as the server patches it (gemma4.py), at
+# gemma4.encoded_size onto cells of patch_size x pooling_kernel_size.
 JUDGED_PROCESSORS = {
-    "mlx_vlm.models.qwen3_vl.processing_qwen3_vl": (
-        "9c6bc521ea6b45c3346967502f2d0b69697371327d7b340c23650e76de91f5d2"
+    "qwen3": (
+        "mlx_vlm.models.qwen3_vl.processing_qwen3_vl",
+        "9c6bc521ea6b45c3346967502f2d0b69697371327d7b340c23650e76de91f5d2",
+    ),
+    "gemma4": (
+        "mlx_vlm.models.gemma4.processing_gemma4",
+        "940cb231e4b922714285276ac97ab7ea2ddf8adc216151f40887c5df75fb7e14",
     ),
 }
 
@@ -148,26 +155,30 @@ def _verify_upstream() -> None:
         expect_source("count", what, fn, sha, OWES)
 
 
-def _verify_processor(processor) -> None:
-    """Refuse unless both the processor, whose expansion the shortcut rests on, and its image processor, whose sizing grid, processed_size and pixel_limit read, are classes of a judged module at its judged source."""
+def _verify_processor(processor, family: str) -> None:
+    """Refuse unless both the processor, whose expansion the shortcut rests on, and its image processor, whose sizing grid, processed_size and pixel_limit read, are classes of the module judged for the card's family, at its judged source."""
     import importlib
 
+    judged, sha = JUDGED_PROCESSORS[family]
     for held in (processor, processor.image_processor):
         module = type(held).__module__
-        if module not in JUDGED_PROCESSORS:
+        if module != judged:
             refuse(
                 "count",
                 f"the {type(held).__name__}",
-                f"(module {module}) is not one the per-image shortcut and the sizing were judged on",
+                f"(module {module}) is not {judged}, the one the per-image shortcut and the "
+                f"sizing were judged on for family {family}",
                 OWES,
             )
-        expect_source(
-            "count",
-            module,
-            importlib.import_module(module),
-            JUDGED_PROCESSORS[module],
-            OWES,
-        )
+        expect_source("count", module, importlib.import_module(module), sha, OWES)
+
+
+@functools.cache
+def _family(model: str) -> str:
+    """The family of the card naming `model`, which decides the patches the server installs for it (serve.FAMILY_PATCHES) and so how the count sizes and renders."""
+    from ..model.cards import load_card
+
+    return load_card(_slug(model))["family"]
 
 
 def _slug(model: str) -> str:
@@ -256,10 +267,15 @@ def _resources(model: str):
     from .serve import install_heif_decode
 
     _verify_upstream()
-    # The server decodes HEIF images and renders every turn as chat_turns.py has it, so the
-    # count reads and renders what it does.
+    # The server decodes HEIF images, renders every turn as chat_turns.py has it, and serving a
+    # Gemma 4 card loads its processor as gemma4.py has it, so the count reads, renders and sizes
+    # what the server does.
     install_heif_decode()
     install_chat_turns()
+    if _family(model) == "gemma4":
+        from .gemma4 import install_processor_contract
+
+        install_processor_contract()
     kwargs = {
         "trust_remote_code": os.environ.get("MLX_TRUST_REMOTE_CODE", "false").lower()
         == "true",
@@ -295,7 +311,7 @@ def _resources(model: str):
     )
     if image_processor is not None:
         processor.image_processor = image_processor
-    _verify_processor(processor)
+    _verify_processor(processor, _family(model))
     return processor, model_config
 
 
@@ -413,7 +429,7 @@ def _count(model: str, prompt: str, sizes: list, options: tuple) -> int:
 def prompt_tokens(request: dict) -> int:
     """The prompt_tokens the server would report for this chat-completions request body (the client's own request: model, messages, tools, and the extra_body fields merged in).
 
-    The server preprocesses every image of a request together; this count gets the same number while holding at most one image at a time. The processor expands each image's placeholder by that image alone — from the grid its size and the request's preprocessing options decide, nothing else in the request (the judged processors, JUDGED_PROCESSORS) — so the prompt is tokenized once with its placeholders unexpanded, and each image adds its expansion, taken once per distinct size and kept. Each image is read by upstream's own loader, as the server reads it, for its size alone."""
+    The server preprocesses every image of a request together; this count gets the same number while holding at most one image at a time. The processor expands each image's placeholder by that image alone — from the grid its size and the request's preprocessing options decide, nothing else in the request (the processors judged for each family, JUDGED_PROCESSORS) — so the prompt is tokenized once with its placeholders unexpanded, and each image adds its expansion, taken once per distinct size and kept. Each image is read by upstream's own loader, as the server reads it, for its size alone."""
     require_extra("mlx.core", "mlx_vlm")
     from mlx_vlm.utils import load_image
 
@@ -425,23 +441,79 @@ def prompt_tokens(request: dict) -> int:
 
 @functools.cache
 def grid(model: str) -> int:
-    """The side, in pixels, of the cell the model's processor sizes every image in: it encodes an image at a multiple of this on each side (the judged processors' patch size times their merge size)."""
+    """The side, in pixels, of the cell the model's processor sizes every image in: it encodes an image at a multiple of this on each side (the judged processors' patch size times their merge or pooling size)."""
     require_extra("mlx.core", "mlx_vlm")
-    with _serving(model):
-        processor, _ = _resources(model)
-        return (
-            processor.image_processor.patch_size * processor.image_processor.merge_size
-        )
+    _check_image_tokens(model)
+    return _grid(model)
 
 
 @functools.cache
 def processed_size(model: str, width: int, height: int) -> tuple[int, int]:
-    """The (width, height) the server's processor encodes an image of this size at, under the pixel limits a request is served with: the processor's own sizing (the judged processors' _resolved_size), as the server's preprocessing calls it."""
+    """The (width, height) the server's processor encodes an image of this size at, under the pixel limits a request is served with: the processor's own sizing (Qwen3-VL's _resolved_size, Gemma 4's encoded_size as the server patches it), as the server's preprocessing calls it."""
     require_extra("mlx.core", "mlx_vlm")
+    _check_image_tokens(model)
+    return _processed_size(model, width, height)
+
+
+@functools.cache
+def image_tokens(model: str, width: int, height: int) -> int:
+    """What one image of this size costs in the server's count, everything the template wraps around it included: the count of a one-image request less the same request without it."""
+    require_extra("mlx.core", "mlx_vlm")
+    _check_image_tokens(model)
+    return _image_tokens(model, width, height)
+
+
+@functools.cache
+def _check_image_tokens(model: str) -> None:
+    """Refuse the card whose image_tokens holds a value outside what the model's processor encodes: below the cost of the smallest image it encodes, or above the cost of the largest. Run once, the first time the model's processor sizes or costs an image (grid, processed_size, image_tokens, pixel_limit), so every reader of the card's image_tokens has it checked before using it."""
+    from ..model.cards import load_card
+
+    name = _slug(model)
+    smallest, largest = _image_token_range(model)
+    outside = {
+        kind: value
+        for kind, value in load_card(name)["image_tokens"].items()
+        if not smallest <= value <= largest
+    }
+    if outside:
+        raise ValueError(
+            f"card {name!r} image_tokens {outside} is outside what {model}'s processor "
+            f"encodes: its smallest image costs {smallest} tokens and its largest "
+            f"{largest}, start and end markers included — set each value within that range"
+        )
+
+
+def _image_token_range(model: str) -> tuple[int, int]:
+    """The cost, in the server's count, of the smallest and the largest image the model's processor encodes: what it makes of a one-cell image, and _largest_image."""
+    cell = _grid(model)
+    smallest = _image_tokens(model, *_processed_size(model, cell, cell))
+    return smallest, _image_tokens(model, *_largest_image(model))
+
+
+@functools.cache
+def _grid(model: str) -> int:
+    with _serving(model):
+        processor, _ = _resources(model)
+        images = processor.image_processor
+        if _family(model) == "gemma4":
+            return images.patch_size * images.pooling_kernel_size
+        return images.patch_size * images.merge_size
+
+
+@functools.cache
+def _processed_size(model: str, width: int, height: int) -> tuple[int, int]:
     with _serving(model):
         _, _, _, options = _render(_one_image_request(model))
         options = dict(options)
         processor, _ = _resources(model)
+        images = processor.image_processor
+        if _family(model) == "gemma4":
+            from .gemma4 import encoded_size
+
+            sized_height, sized_width = encoded_size(
+                height, width, images.patch_size, images.pooling_kernel_size
+            )
+            return sized_width, sized_height
         sized_height, sized_width = processor.image_processor._resolved_size(
             height,
             width,
@@ -453,26 +525,60 @@ def processed_size(model: str, width: int, height: int) -> tuple[int, int]:
 
 @functools.cache
 def pixel_limit(model: str) -> int:
-    """The pixel limit the model's processor sizes images under in the serving env, floored to whole cells of its grid. A request that sets its own min_pixels can have an image encoded past it."""
-    cell = grid(model)
+    """The pixel limit the model's processor sizes images under in the serving env, in whole cells of its grid: Qwen3-VL's max_pixels floored to whole cells, Gemma 4's largest trained budget as the server patches it. A request that sets its own min_pixels can have a Qwen3-VL image encoded past it."""
+    require_extra("mlx.core", "mlx_vlm")
+    _check_image_tokens(model)
+    return _cell_budget(model) * _grid(model) ** 2
+
+
+@functools.cache
+def _cell_budget(model: str) -> int:
+    """How many grid cells the model's processor encodes one image in at most, under the serving env."""
+    cell = _grid(model)
     with _serving(model):
         _, _, _, options = _render(_one_image_request(model))
         processor, _ = _resources(model)
+        images = processor.image_processor
+        if _family(model) == "gemma4":
+            from .gemma4 import MAX_SOFT_TOKENS
+
+            return MAX_SOFT_TOKENS
         limit = dict(options).get("max_pixels")
         if limit is None:
-            limit = processor.image_processor.max_pixels
+            limit = images.max_pixels
     if limit < cell**2:
         raise ValueError(
             f"{model}'s processor pixel limit {limit} is under one {cell}x{cell} cell of its "
             f"grid, so no image encodes under it — check the serving env's MLX_VLM_MAX_PIXELS"
         )
-    return limit // cell**2 * cell**2
+    return limit // cell**2
 
 
 @functools.cache
-def image_tokens(model: str, width: int, height: int) -> int:
-    """What one image of this size costs in the server's count, everything the template wraps around it included: the count of a one-image request less the same request without it."""
-    require_extra("mlx.core", "mlx_vlm")
+def _largest_image(model: str) -> tuple[int, int]:
+    """The (width, height) of the on-grid image with the most cells within the processor's cell budget that the processor encodes as sent: the largest image it encodes."""
+    import math
+
+    cell, budget = _grid(model), _cell_budget(model)
+    best = None
+    for across in range(math.isqrt(budget), 0, -1):
+        down = budget // across
+        if best is not None and across * down <= best[0] * best[1] // cell**2:
+            continue
+        size = (across * cell, down * cell)
+        if _processed_size(model, *size) == size:
+            best = size
+    if best is None:
+        raise ValueError(
+            f"{model}'s processor encodes no on-grid image within its budget of {budget} "
+            f"cells as sent — re-check the sizing grid and processed_size read "
+            f"(analysis/src/locus/analysis/mlx/count.py)"
+        )
+    return best
+
+
+@functools.cache
+def _image_tokens(model: str, width: int, height: int) -> int:
     with_image = _one_image_request(model)
     without = {
         "model": model,

@@ -1,7 +1,7 @@
 """Thin locus layer over the upstream mlx-vlm server.
 
 Upstream (mlx_vlm.server) owns generation: continuous batching, structured output, thinking budget, APC prefix caching, speculative decode, vision feature cache.
-This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent, never compacted (chat_turns.py), and two math-preserving patches (the vision-encode chunking, the fused attention). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
+This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent, never compacted (chat_turns.py), and the served family's own patches (Qwen's vision-encode chunking and fused attention; Gemma 4's in gemma4.py). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
 README.md says what each is for.
 
 Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
@@ -11,7 +11,7 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
 - the chat template reads a tool message's images, an assistant answer's reasoning and the request's template options, but upstream drops the first two before the template and gives a request no way to pass the third (chat_template_kwargs).
   Patched here: chat_turns.install_chat_turns carries all three to the template.
 - a request's images encode in one batch, so the vision-encode transient scales with the request's total pixels and no token-denominated guard bounds it — a large enough image batch aborts the server even when it fits the token context (MAX_KV_SIZE counts expanded vision tokens, so its guard doesn't close this).
-  Patched here: vision_chunking.install_vision_encode_chunking encodes in chunks of at most the processor's pixel limit (count.pixel_limit), an image a request's own min_pixels sizes past it alone, output-identical on the pinned upstream.
+  Patched here: vision_chunking.install_vision_encode_chunking encodes Qwen's in chunks of at most the processor's pixel limit (count.pixel_limit), an image a request's own min_pixels sizes past it alone, output-identical on the pinned upstream.
 - on GPUs without neural accelerators, mlx reads a multi-token chunk of a head-dim-256 model by materializing its whole score table, so prefill memory grows with the prompt (16 GiB per 2,048-token chunk at 256k keys).
   Patched here: fused_attention.install_fused_attention has Qwen's attention ask mlx for its fused kernel, which never holds the table.
 - the GPU loop keeps a request's pixel arrays referenced after encoding them, through the request's prefill and decode and until the next request arrives (over 1 GiB for 47k image tokens).
@@ -20,6 +20,8 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: install_gpu_tracking counts the requests the loop holds, and admission frees its slot only once that count is zero.
 - the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request.
   Patched here: chat_turns.install_chat_turns has the handler never compact, and refuses a request that asks it to.
+- Gemma 4: an image prompt prefills unchunked, with prompt × prompt masks and the image overlay on every layer and past the sliding window; a request's images encode as one graph; every image is resized to fill the processor config's 280-token budget; the checkpoint's chat template is stale; and the reasoning split tries the single-token thinking markers the thinking budget needs ahead of its own pair for the whole channel header, so every returned thought begins with the header's `thought`.
+  Patched here: gemma4.py, whose docstring says what each patch does.
 - thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
 
 Usage: locus-mlx-serve <card name>   (an openai-compatible card in config/cards/)
@@ -53,12 +55,18 @@ SERVER_ENV = {
 }
 
 
-# The card owns which repo the server loads (`model`), the context it holds (`context_tokens` → MAX_KV_SIZE), and the endpoint analysis dials (`base_url` → bind host/port); the server derives all three at boot, reading the card only through cards.load_card as analysis does, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
+# The card owns which repo the server loads (`model`), the context it holds (`context_tokens` → MAX_KV_SIZE), the endpoint analysis dials (`base_url` → bind host/port), and the model's thinking markers when they aren't upstream's (`thinking_markers`); the server derives them all at boot, reading the card only through cards.load_card as analysis does, so what it serves, guards, and where it listens cannot drift from what analysis requests and prices.
 def serving_env(name: str) -> dict[str, str]:
-    """The environment the bundled server serves the card `name` under, over what it inherits: the server's own settings (SERVER_ENV) and the card's context as MAX_KV_SIZE. The boot applies it to the server; the count (count.py) runs upstream under it, so both read the same settings."""
+    """The environment the bundled server serves the card `name` under, over what it inherits: the server's own settings (SERVER_ENV), the card's context as MAX_KV_SIZE, and the card's thinking markers when it declares them. The boot applies it to the server; the count (count.py) runs upstream under it, so both read the same settings."""
     from locus.analysis.model.cards import load_card
 
-    return {**SERVER_ENV, "MAX_KV_SIZE": str(load_card(name)["context_tokens"])}
+    card = load_card(name)
+    env = {**SERVER_ENV, "MAX_KV_SIZE": str(card["context_tokens"])}
+    if "thinking_markers" in card:
+        start, end = card["thinking_markers"]
+        env["MLX_VLM_THINKING_START_TOKEN"] = start
+        env["MLX_VLM_THINKING_END_TOKEN"] = end
+    return env
 
 
 def undeclared_count_env(slug: str) -> list[str]:
@@ -710,6 +718,44 @@ def install_gpu_tracking(admission: Admission) -> None:
     generation.ResponseGenerator.generate = tracked_generate
 
 
+def install_qwen3(encode_chunk: int) -> None:
+    """Qwen's own patches: its vision encode in chunks of at most `encode_chunk` pixels, and its attention through mlx's fused kernel."""
+    from .fused_attention import install_fused_attention
+    from .vision_chunking import install_vision_encode_chunking
+
+    install_vision_encode_chunking(encode_chunk)
+    logger.info(
+        f"vision-encode chunking installed: a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit; an image a request's own min_pixels sizes past it encodes alone"
+    )
+    install_fused_attention()
+    logger.info(
+        "fused attention installed: Qwen's attention reads every chunk through mlx's fused kernel, never materializing the score table"
+    )
+
+
+def install_gemma4(encode_chunk: int) -> None:
+    """Gemma 4's own patches (gemma4.py), its vision encode in chunks of at most `encode_chunk` pixels."""
+    from .gemma4 import (
+        install_image_aligned_prefill,
+        install_processor_contract,
+        install_reasoning_markers,
+        install_vision_encode_chunking,
+    )
+
+    install_processor_contract()
+    install_reasoning_markers()
+    install_vision_encode_chunking(encode_chunk)
+    install_image_aligned_prefill()
+    logger.info(
+        f"gemma4 installed: an image is encoded at the size it was sent, a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit, an image prompt prefills in chunks ending at image boundaries with the image overlay on the sliding layers within their window, the canonical chat template renders, and returned thinking has no channel header"
+    )
+
+
+# Each supported family's own patches. The card loader refuses a card of any other family
+# (cards.SUPPORTED_FAMILIES).
+FAMILY_PATCHES = {"qwen3": install_qwen3, "gemma4": install_gemma4}
+
+
 def main() -> None:
     require_extra("mlx.core", "mlx_vlm", "uvicorn", "pillow_heif")
     install_log_handler()
@@ -747,7 +793,7 @@ def main() -> None:
         raise SystemExit(exc) from exc
 
     os.environ["MLX_VLM_PRELOAD_MODEL"] = hf_repo
-    # The serving env — SERVER_ENV and the card's KV budget — beats an inherited shell value,
+    # The serving env — SERVER_ENV and what the card sets — beats an inherited shell value,
     # loudly. To override, edit the card or SERVER_ENV.
     for key, value in serving_env(slug).items():
         inherited = os.environ.get(key)
@@ -781,20 +827,6 @@ def main() -> None:
     install_preprocess_serializer()
     install_pixel_release()
 
-    from .vision_chunking import install_vision_encode_chunking
-
-    install_vision_encode_chunking(encode_chunk)
-    logger.info(
-        f"vision-encode chunking installed: a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit; an image a request's own min_pixels sizes past it encodes alone"
-    )
-
-    from .fused_attention import install_fused_attention
-
-    install_fused_attention()
-    logger.info(
-        "fused attention installed: Qwen's attention reads every chunk through mlx's fused kernel, never materializing the score table"
-    )
-
     from mlx_vlm.server import app
 
     install_prompt_recording()
@@ -812,6 +844,9 @@ def main() -> None:
     logger.info(
         "chat turns installed: no conversation is compacted, and a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the chat template"
     )
+
+    # Last: Gemma 4's wraps PromptProcessingBatch.__init__, which the presence penalty verifies.
+    FAMILY_PATCHES[card["family"]](encode_chunk)
 
     admission = Admission()
     install_gpu_tracking(admission)

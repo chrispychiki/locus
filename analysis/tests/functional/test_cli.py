@@ -9,6 +9,7 @@ from _analysis_support import (
     GEMINI,
 )
 from _cli_support import (
+    LOCAL_CARD,
     artifact,
     data_home,
     definitions_into,
@@ -993,8 +994,7 @@ def test_analyze_model_flag_selects_over_the_roster(tmp_path, capsys, monkeypatc
     remark_default(monkeypatch, tmp_path, GEMINI, dirname="shipped-cards")
     monkeypatch.setenv("GOOGLE_API_KEY", "test-not-used")
     assert cards.default_card() == GEMINI
-    local = cards.models_speaking(cards.OPENAI_COMPATIBLE)[0]
-    assert local != GEMINI
+    local = LOCAL_CARD
     main(["analyze", slice_id, "what happened?", "--model", local])
     assert read_output(capsys)["model"] == local
 
@@ -1449,7 +1449,7 @@ def test_analyze_defaults_to_the_deployments_default_card(
     from locus.analysis.model import cards
 
     local = cards.default_card()
-    assert local == cards.models_speaking(cards.OPENAI_COMPATIBLE)[0]
+    assert local == LOCAL_CARD
     monkeypatch.setenv("GOOGLE_API_KEY", "banked")
     main(["analyze", rows[0]["recorder_slice"], "what happened?"])
     capsys.readouterr()

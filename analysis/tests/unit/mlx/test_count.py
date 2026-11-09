@@ -9,7 +9,8 @@ from locus.analysis.mlx import count
 from locus.analysis.model.cards import load_card
 from PIL import Image
 
-MODEL = load_card("qwen3.6-35b-a3b-6bit")["model"]
+CARD = load_card("qwen3.6-35b-a3b-6bit")
+MODEL = CARD["model"]
 
 SERVER_MEASURED = [
     ((1, 1), 66),
@@ -93,12 +94,32 @@ def test_image_geometry_sizes_any_viewport_to_the_per_image_token_value():
         )
 
 
+def test_the_least_value_gets_the_viewports_smallest_size_the_processor_encodes():
+    size = budget.image_geometry(MODEL, 1920, 921, 66)
+    assert size == (384, 192)
+    assert count.processed_size(MODEL, *size) == size, "drawn as encoded"
+    assert count.image_tokens(MODEL, *size) == 74, (
+        "the processor enlarges any smaller size at this shape"
+    )
+
+
 def test_the_processor_sizes_by_its_own_rule():
     assert count.grid(MODEL) == 32
     assert count.processed_size(MODEL, 1120, 544) == (1120, 544), "on the grid, as is"
     assert count.processed_size(MODEL, 1000, 500) == (992, 512), (
         "off it, rounded to cells"
     )
+
+
+# Every cache a count under another pixel limit fills.
+SIZING_CACHES = (
+    "pixel_limit",
+    "_cell_budget",
+    "_largest_image",
+    "_check_image_tokens",
+    "_processed_size",
+    "_image_tokens",
+)
 
 
 def _pixel_limit_under(monkeypatch, max_pixels):
@@ -110,16 +131,18 @@ def _pixel_limit_under(monkeypatch, max_pixels):
         "serving_env",
         lambda slug: {**declared(slug), "MLX_VLM_MAX_PIXELS": str(max_pixels)},
     )
-    count.pixel_limit.cache_clear()
+    for name in SIZING_CACHES:
+        getattr(count, name).cache_clear()
     try:
         return count.pixel_limit(MODEL)
     finally:
-        count.pixel_limit.cache_clear()
+        for name in SIZING_CACHES:
+            getattr(count, name).cache_clear()
 
 
 def test_the_pixel_limit_is_the_processors_floored_to_whole_cells(monkeypatch):
     assert count.pixel_limit(MODEL) == 4096 * 4096
-    assert _pixel_limit_under(monkeypatch, 100 * 1024 + 500) == 100 * 1024
+    assert _pixel_limit_under(monkeypatch, 1300 * 1024 + 500) == 1300 * 1024
 
 
 def test_a_pixel_limit_under_one_cell_fails_loud(monkeypatch):
@@ -127,15 +150,36 @@ def test_a_pixel_limit_under_one_cell_fails_loud(monkeypatch):
         _pixel_limit_under(monkeypatch, 100)
 
 
-def test_a_value_the_processor_cannot_produce_fails_loud():
-    for value in (10, count.image_tokens(MODEL, 32, 32)):
-        with pytest.raises(ValueError, match="below the cost"):
-            budget.image_geometry(MODEL, 1920, 921, value)
-    largest = count.image_tokens(MODEL, 4096, 4096)
-    with pytest.raises(ValueError, match="above the cost"):
-        budget.image_geometry(MODEL, 1920, 921, largest)
-    with pytest.raises(ValueError, match="above the cost"):
-        budget.image_geometry(MODEL, 1920, 921, 10**9)
+def test_the_processor_encodes_from_its_smallest_image_to_its_budget():
+    assert count._image_token_range(MODEL) == (66, 16386), (
+        "a one-cell image enlarged to the processor's least pixels, and 4096x4096 at its most"
+    )
+
+
+def test_gemma4_encodes_up_to_its_largest_trained_budget():
+    gemma = load_card("gemma-4-26b-a4b-6bit")["model"]
+    assert count.pixel_limit(gemma) == 1120 * 48 * 48
+    assert count._image_token_range(gemma) == (3, 1122)
+
+
+def test_a_card_value_outside_what_the_processor_encodes_is_refused(monkeypatch):
+    from locus.analysis.model import cards
+
+    for value in (65, 16387):
+        outside = {**CARD["image_tokens"], "pulled_screenshots": value}
+        monkeypatch.setattr(
+            cards,
+            "load_card",
+            lambda name, table=outside: {**CARD, "image_tokens": table},
+        )
+        count._check_image_tokens.cache_clear()
+        with pytest.raises(
+            ValueError, match="smallest image costs 66 tokens and its largest 16386"
+        ):
+            count._check_image_tokens(MODEL)
+    monkeypatch.setattr(cards, "load_card", lambda name: CARD)
+    count._check_image_tokens.cache_clear()
+    count._check_image_tokens(MODEL)
 
 
 def test_an_unjudged_upstream_refuses_to_count(monkeypatch):
@@ -144,7 +188,14 @@ def test_an_unjudged_upstream_refuses_to_count(monkeypatch):
         count._verify_upstream()
 
 
-def test_an_image_processor_outside_the_judged_modules_refuses_to_count():
+def test_a_processor_of_another_familys_module_refuses_to_count():
+    with count._serving(MODEL):
+        processor, _ = count._resources(MODEL)
+    with pytest.raises(SystemExit, match="judged on for family gemma4"):
+        count._verify_processor(processor, "gemma4")
+
+
+def test_an_image_processor_outside_the_judged_module_refuses_to_count():
     """grid and processed_size read the image processor's sizing, so the image processor is judged by its own module, never through the processor holding it."""
 
     class Unjudged:
@@ -156,7 +207,7 @@ def test_an_image_processor_outside_the_judged_modules_refuses_to_count():
     processor.image_processor = Unjudged()
     try:
         with pytest.raises(SystemExit, match="Unjudged"):
-            count._verify_processor(processor)
+            count._verify_processor(processor, "qwen3")
     finally:
         processor.image_processor = held
 

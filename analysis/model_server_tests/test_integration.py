@@ -10,6 +10,7 @@ Contract notes for the upstream server: thinking arrives as `reasoning` (not `re
 import json
 from pathlib import Path
 
+import pytest
 import requests
 from locus.analysis.mlx.chat import loaded_model
 from locus.analysis.mlx.serve import sole_bind
@@ -28,6 +29,19 @@ COLORS = {
     "purple": (140, 60, 180),
     "orange": (240, 140, 30),
 }
+
+# What an image renders as in the prompt the server records, by card family: the chat template's
+# own placeholder, which the processor expands to the image's tokens.
+IMAGE_IN_PROMPT = {
+    "qwen3": "<|vision_start|><|image_pad|><|vision_end|>",
+    "gemma4": "<|image|>",
+}
+
+
+def family(card: str) -> str:
+    from locus.analysis.model.cards import load_card
+
+    return load_card(card)["family"]
 
 
 def chat(
@@ -58,7 +72,7 @@ def chat(
 
 
 def last_rendered_prompt() -> str:
-    """The rendering the server recorded for the last request it took — read from this clone, where the server under test was booted. The record is the latest request's, so a test reading it holds the server to itself: another client's request in between overwrites it."""
+    """The rendering the server recorded for the last request it took — read from this clone, where the server under test was booted. The record is the latest request's, so a test reading it is marked reads_rendering, which keeps the suite's other requests out until it is done (conftest); a request from outside the suite in between still overwrites it."""
     from contextlib import chdir
 
     from locus.analysis.mlx.paths import rendered_prompt
@@ -107,6 +121,8 @@ def test_text_only_thinking_split():
 
 
 def test_image_counting_and_color_via_schema(tmp_path):
+    from locus.analysis.mlx.count import image_tokens
+
     path = smiley_image(tmp_path, count=4, color="red")
     schema = {
         "type": "object",
@@ -116,26 +132,15 @@ def test_image_counting_and_color_via_schema(tmp_path):
         },
         "required": ["object_count", "object_color"],
     }
+    question = {
+        "type": "text",
+        "text": "How many smiley faces are in this image and what color are they? Respond with JSON.",
+    }
     text_only_tokens = chat(
-        [
-            {"role": "user", "content": "Reply with exactly: ok"},
-        ],
-        enable_thinking=False,
-        max_tokens=8,
+        [{"role": "user", "content": [question]}], schema=schema, max_tokens=1
     ).json()["usage"]["prompt_tokens"]
     response = chat(
-        [
-            {
-                "role": "user",
-                "content": [
-                    image_part(path),
-                    {
-                        "type": "text",
-                        "text": "How many smiley faces are in this image and what color are they? Respond with JSON.",
-                    },
-                ],
-            },
-        ],
+        [{"role": "user", "content": [image_part(path), question]}],
         schema=schema,
     ).json()
 
@@ -143,12 +148,13 @@ def test_image_counting_and_color_via_schema(tmp_path):
     parsed = json.loads(message["content"])
     assert parsed["object_count"] == 4, f"model saw {parsed['object_count']} smileys"
     assert parsed["object_color"] == "red"
-    assert response["usage"]["prompt_tokens"] > text_only_tokens + 50, (
-        "prompt_tokens do not reflect vision tokens — image not received"
-    )
+    assert response["usage"]["prompt_tokens"] - text_only_tokens == image_tokens(
+        loaded_model(), 400, 200
+    ), "prompt_tokens do not reflect the image's tokens — image not received"
 
 
-def test_interleaved_order_survives_many_images(tmp_path):
+@pytest.mark.reads_rendering
+def test_interleaved_order_survives_many_images(tmp_path, served_card):
     """12 solid-color cards interleaved with their index labels, and the model must report the color at one specific position. Passes only if interleaving and order preserve image identity through the vision tower."""
     sequence = [
         "red",
@@ -194,8 +200,7 @@ def test_interleaved_order_survives_many_images(tmp_path):
     # after the last. The semantic assert above cannot prove placement (ordinal matching answers
     # it even from a collapsed rendering); this reads the rendering itself.
     rendered = last_rendered_prompt()
-    vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
-    segments = rendered.split(vision_block)
+    segments = rendered.split(IMAGE_IN_PROMPT[family(served_card)])
     assert len(segments) == len(sequence) + 1, (
         f"expected {len(sequence)} vision blocks in the rendered prompt, found {len(segments) - 1}"
     )
@@ -423,8 +428,8 @@ def test_the_in_process_count_is_the_servers_count(tmp_path):
     assert prompt_tokens(body) == served.json()["usage"]["prompt_tokens"]
 
 
-def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
-    """The handler's half of chat_turns.py, read off the rendering the server records: a tool reply's screenshot renders inside the reply, every assistant turn's reasoning renders under preserve_thinking, and a template option the template never reads is refused."""
+def pull_conversation(tmp_path) -> dict:
+    """A conversation with a pull in it: a tool-call turn with its thinking, a tool reply carrying a screenshot, an answer with its thinking, and a later user message, under preserve_thinking."""
     path = tmp_path / "pull.png"
     Image.new("RGB", (480, 925), COLORS["blue"]).save(path)
     call = {
@@ -432,7 +437,7 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
         "type": "function",
         "function": {"name": "request_screenshots", "arguments": "{}"},
     }
-    body = {
+    return {
         "model": loaded_model(),
         "messages": [
             {"role": "system", "content": "You read screenshots."},
@@ -463,16 +468,9 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
         "enable_thinking": True,
         "chat_template_kwargs": {"preserve_thinking": True},
     }
-    requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
-    rendered = last_rendered_prompt()
-    reply = rendered.split("<tool_response>\n", 1)[1].split("\n</tool_response>", 1)[0]
-    assert reply == (
-        "screenshot at 00:01.000:<|vision_start|><|image_pad|><|vision_end|>"
-        "What color is the screen?"
-    )
-    assert "<think>\nREASONING-BEFORE-THE-PULL\n</think>" in rendered
-    assert "<think>\nREASONING-OF-THE-ANSWER\n</think>" in rendered
 
+
+def assert_an_unread_option_is_refused(body):
     refused = requests.post(
         CHAT,
         json={**body, "chat_template_kwargs": {"preserve_thinkng": True}},
@@ -482,7 +480,40 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
     assert "never reads" in refused.text
 
 
-def test_a_conversation_is_served_as_composed_and_never_compacted():
+@pytest.mark.family("qwen3")
+@pytest.mark.reads_rendering
+def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
+    """The handler's half of chat_turns.py, read off the rendering the server records: a tool reply's screenshot renders inside the reply, every assistant turn's reasoning renders under preserve_thinking, and a template option the template never reads is refused."""
+    body = pull_conversation(tmp_path)
+    requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
+    rendered = last_rendered_prompt()
+    reply = rendered.split("<tool_response>\n", 1)[1].split("\n</tool_response>", 1)[0]
+    assert reply == (
+        "screenshot at 00:01.000:<|vision_start|><|image_pad|><|vision_end|>"
+        "What color is the screen?"
+    )
+    assert "<think>\nREASONING-BEFORE-THE-PULL\n</think>" in rendered
+    assert "<think>\nREASONING-OF-THE-ANSWER\n</think>" in rendered
+    assert_an_unread_option_is_refused(body)
+
+
+@pytest.mark.family("gemma4")
+@pytest.mark.reads_rendering
+def test_every_turn_reaches_gemmas_template_as_it_was_sent(tmp_path):
+    """The handler's half of chat_turns.py under Google's canonical template, read off the rendering the server records: a tool reply's screenshot renders after the reply's text, where that template places a tool reply's images; the tool-call turn's thinking renders past the later user message under preserve_thinking, closed right after its last character (gemma4.py's repair); the answer's thinking, a turn before that message without a tool call, is dropped; and a template option the template never reads is refused."""
+    body = pull_conversation(tmp_path)
+    requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
+    rendered = last_rendered_prompt()
+    assert (
+        '<|tool_response>response:request_screenshots{value:<|"|>screenshot at '
+        '00:01.000:What color is the screen?<|"|>}<tool_response|><|image|>'
+    ) in rendered
+    assert "<|channel>thought\nREASONING-BEFORE-THE-PULL<channel|>" in rendered
+    assert "REASONING-OF-THE-ANSWER" not in rendered
+    assert_an_unread_option_is_refused(body)
+
+
+def test_a_conversation_is_served_as_composed_and_never_compacted(served_card):
     """Compaction would serve a conversation the client never composed — its head summarized, its max_tokens clamped to the context left — so a request that asks for it is refused, and one over the context limit is refused rather than compacted to fit."""
     from locus.analysis.model.cards import load_card
 
@@ -507,7 +538,7 @@ def test_a_conversation_is_served_as_composed_and_never_compacted():
         CHAT,
         json={
             **body,
-            "max_tokens": load_card("qwen3.6-35b-a3b-6bit")["context_tokens"],
+            "max_tokens": load_card(served_card)["context_tokens"],
         },
         timeout=TIMEOUT,
     )
@@ -517,14 +548,14 @@ def test_a_conversation_is_served_as_composed_and_never_compacted():
     requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
 
 
-def test_the_clients_pre_send_count_is_what_the_server_reports(tmp_path):
+def test_the_clients_pre_send_count_is_what_the_server_reports(tmp_path, served_card):
     """The client counts each request as it will send it (OpenAICompatConversation.wire_request), its own replay of the model's reply and thinking included, so before every call the count it refuses by and context_remaining reads is the number the server then reports."""
     from locus.analysis.mlx.count import prompt_tokens
     from locus.analysis.model.cards import load_card
     from locus.analysis.model.openai_compat import OpenAICompatConversation
     from locus.analysis.prompts import request_screenshots_tool
 
-    card = load_card("qwen3.6-35b-a3b-6bit")
+    card = load_card(served_card)
     card.update(max_tokens=256, thinking_budget=128)
     conversation = OpenAICompatConversation(
         "You read screenshots.", card=card, record_dir=tmp_path / "record"

@@ -4,7 +4,7 @@ model = "gemini-3.8-flash"
 default = true
 # Input limit per the model page: https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
 context_tokens = 1048576
-# Lower than the local card's: pulled screenshots ride the detail tier and the whole conversation
+# Lower than the local cards': pulled screenshots ride the detail tier and the whole conversation
 # re-bills every turn.
 headroom = 0.5
 thinking_levels = ["low", "medium", "high"]

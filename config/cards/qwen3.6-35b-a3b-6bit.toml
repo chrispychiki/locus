@@ -2,7 +2,9 @@
 conversation = "openai-compatible"
 # The bundled mlx server reads `model`, `context_tokens`, and `base_url` at boot; an edit to them
 # while a server is resident takes effect only at its next boot.
-# Serving this model at this context takes a Mac with 64GB of memory.
+# A request filling this context (261,337 prompt tokens with 351 screenshots, then 807 generated)
+# peaked at 39.9 GiB of live arrays on an M4 Pro Mac mini with 64 GB; the wired limit
+# (iogpu.wired_limit_mb) has to allow that.
 model = "mlx-community/Qwen3.6-35B-A3B-6bit"
 base_url = "http://127.0.0.1:8847/v1"
 family = "qwen3"

@@ -18,15 +18,16 @@ The server is upstream mlx-vlm behind an operational layer; it holds no opinion 
 Resize from new measurements, never by feel.
 
 An openai-compatible card also declares its `family`, `image_tokens`, and `base_url`.
-The bundled server bounds its memory with patches bound to one model family's modules (mlx/fused_attention.py, mlx/vision_chunking.py), so a model outside that family would be served without those bounds, and the count's per-image shortcut has been judged on that family's processor alone (mlx/count.py JUDGED_PROCESSORS); `family` states the card's membership, and a card outside SUPPORTED_FAMILIES is refused at load.
+The bundled server bounds its memory with patches bound to each supported family's modules (Qwen's in mlx/fused_attention.py and mlx/vision_chunking.py, Gemma 4's in mlx/gemma4.py), so a model outside those families would be served without those bounds, and the count's per-image shortcut has been judged on those families' processors alone (mlx/count.py JUDGED_PROCESSORS); `family` states the card's membership, and a card outside SUPPORTED_FAMILIES is refused at load.
 `image_tokens` is a table keyed by an analysis's two kinds of screenshot, `activity_screenshots` (the pushed set) and `pulled_screenshots` (the served pulls). Each value is the token count of one screenshot of that kind at any viewport: the renderer draws the screenshot at the largest size on the model's grid whose cost in the server's count fits the value (budget.image_geometry). Pricing counts the window's screenshots at the activity value, so how much a window holds follows the card.
+An openai-compatible card whose model thinks inside other markers than upstream's `<think>` and `</think>` declares them as `thinking_markers = [start, end]`: the bundled server's thinking budget and thinking-aware grammar match those tokens (mlx/serve.py serving_env).
 An openai-compatible card may also declare `chat_template_kwargs`, a table of options to the model's chat template, sent verbatim on every request in the field of that name, the one vLLM and SGLang take; the bundled server hands it to the template (mlx/chat_turns.py).
 `base_url` is the OpenAI-compatible endpoint the backend dials — and the one home for that address: the bundled mlx server derives its bind host/port from the same field at boot, so analysis and the server cannot drift.
 Gemini cards carry none of these: their image dial is `media_resolution`, the same table keyed by the same two kinds, mapping each to the tier it rides — flat-priced per image within a tier, with the choosing rationale beside the dial in the card file.
 
 A `pricing` block — per-token prices in USD per million tokens (fresh input, cached input, output; thinking bills at the output rate) — is what declares a card's calls billed, the same way `conversation` declares its client: a card with prices has every generation call spend-governed (walled and ledgered, spend.py) at exactly those rates, and a card without them is free.
 Every Gemini card declares the block, because its wire always bills — a Gemini conversation refuses at construction without one.
-The shipped openai-compatible card declares none: a call to the bundled server spends nothing real.
+The shipped openai-compatible cards declare none: a call to the bundled server spends nothing real.
 
 The supported-fields set is the declared boundary: a card may only carry sampling fields the bundled server verifiably honors end to end.
 Upstream's batched sampler implements temperature/top_p/top_k (min_p is accepted at the wire and dropped before the draw) — verified at mlx-vlm 0.7.10 (https://github.com/Blaizzy/mlx-vlm/blob/v0.7.10/mlx_vlm/server/generation.py: _make_sampler builds _PositionedTargetSampler from temperature/top_p/top_k/seed alone); presence_penalty runs as a logit processor over the tokens the request has generated, the bundled server's own (mlx/presence_penalty.py).
@@ -47,7 +48,7 @@ SUPPORTED_SAMPLING = {
     "presence_penalty",
 }
 
-SUPPORTED_FAMILIES = {"qwen3"}
+SUPPORTED_FAMILIES = {"qwen3", "gemma4"}
 
 GEMINI = "gemini"
 OPENAI_COMPATIBLE = "openai-compatible"
@@ -315,9 +316,9 @@ def load_card(name: str) -> dict:
     if card.get("family") not in SUPPORTED_FAMILIES:
         raise ValueError(
             f"card '{name}' declares family {card.get('family')!r}; the bundled "
-            f"server's memory bounds (mlx/fused_attention.py, mlx/vision_chunking.py) "
-            f"patch {sorted(SUPPORTED_FAMILIES)}'s modules, and the count's per-image "
-            f"shortcut is judged on that family's processor (mlx/count.py) — a model "
+            f"server's memory bounds (mlx/fused_attention.py, mlx/vision_chunking.py, "
+            f"mlx/gemma4.py) patch {sorted(SUPPORTED_FAMILIES)}'s modules, and the count's "
+            f"per-image shortcut is judged on those families' processors (mlx/count.py) — a model "
             f"outside those families would be served without the bounds. Declare "
             f"family membership only for a model those patches reach."
         )
@@ -343,6 +344,16 @@ def load_card(name: str) -> dict:
             f"explicit host and port (scheme://host:port/...), so analysis "
             f"and the server agree on one endpoint without a second copy of "
             f"the number anywhere else"
+        )
+    markers = card.get("thinking_markers")
+    if markers is not None and not (
+        isinstance(markers, list)
+        and len(markers) == 2
+        and all(isinstance(marker, str) and marker for marker in markers)
+    ):
+        raise ValueError(
+            f"card '{name}' thinking_markers in {_card_file(name)} is {markers!r} — "
+            f"it declares the model's [start, end] thinking tokens, two non-empty strings"
         )
     template_options = card.get("chat_template_kwargs", {})
     if not isinstance(template_options, dict):

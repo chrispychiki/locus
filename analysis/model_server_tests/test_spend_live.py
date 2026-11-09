@@ -1,6 +1,6 @@
 """Spend governance against the running local server.
 
-A pricing block on a copy of the local card makes its analyses billed, at fictional rates, so the spend walls and the ledger run against real calls that cost nothing.
+A pricing block on a copy of the served local card makes its analyses billed, at fictional rates, so the spend walls and the ledger run against real calls that cost nothing.
 """
 
 import json
@@ -26,13 +26,13 @@ LIVE_PRICES = {
 }
 
 
-def _price_the_local_card(tmp_path, monkeypatch):
+def _price_the_local_card(tmp_path, monkeypatch, card):
     from _analysis_support import card_roster
     from locus.analysis.model import cards
 
     shipped = cards.cards_dir()
     roster = {path.stem: path.read_text() for path in sorted(shipped.glob("*.toml"))}
-    roster["qwen3.6-35b-a3b-6bit"] += (
+    roster[card] += (
         "\n[pricing]\n"
         "input_per_mtok = 1000.0\n"
         "cached_input_per_mtok = 100.0\n"
@@ -42,14 +42,14 @@ def _price_the_local_card(tmp_path, monkeypatch):
 
 
 def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
-    distilled_db, tmp_path, spend_isolation, monkeypatch
+    distilled_db, tmp_path, spend_isolation, monkeypatch, served_card
 ):
     from pathlib import Path
 
     from locus.analysis import engine
     from locus.analysis.model.factory import make_conversation
 
-    _price_the_local_card(tmp_path, monkeypatch)
+    _price_the_local_card(tmp_path, monkeypatch, served_card)
     # The fictional rates make one real analysis cost tens of fake dollars, which the shipped default cap would refuse mid-test — so the test declares its own generous wall and then narrows it to the exact spend below.
     (spend_isolation / "config" / "spend.toml").write_text("week_usd = 100000.0\n")
     conn = connect(distilled_db)
@@ -62,7 +62,7 @@ def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
     result = engine.run_analysis(
         conn,
         resolve_window(conn, [slice_id]),
-        model="qwen3.6-35b-a3b-6bit",
+        model=served_card,
         question="In one sentence: what does this visitor do?",
         site_contexts={"site": "a demo fixture page"},
         out_dir=engine.home_analysis(tmp_path / "analysis"),
@@ -70,7 +70,7 @@ def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
     entries = read_ledger(spend_isolation)
     assert entries, "a billed analysis cannot leave the ledger empty"
     for entry in entries:
-        assert entry["model"] == "qwen3.6-35b-a3b-6bit"
+        assert entry["model"] == served_card
         assert entry["input_tokens"] > 0 and entry["output_tokens"] > 0
         meta = json.loads(Path(entry["record"]).read_text())
         assert entry["input_tokens"] == meta["usage"]["prompt_tokens"], (
@@ -88,7 +88,7 @@ def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
         engine.run_analysis(
             conn,
             resolve_window(conn, [slice_id]),
-            model="qwen3.6-35b-a3b-6bit",
+            model=served_card,
             question="again?",
             site_contexts={"site": "a demo fixture page"},
             out_dir=tmp_path / "analysis2",
@@ -97,9 +97,7 @@ def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
 
     # The conversation layer refuses too — the wall at the wire, with the
     # refused call's input and meta on the record and nothing new ledgered.
-    conversation = make_conversation(
-        "qwen3.6-35b-a3b-6bit", "sys", record_dir=tmp_path / "probe"
-    )
+    conversation = make_conversation(served_card, "sys", record_dir=tmp_path / "probe")
     conversation.add_user_text("Reply with the single word ok.")
     with pytest.raises(SpendWall, match="week spend cap"):
         conversation.get_response(label="probe")
@@ -110,9 +108,7 @@ def test_live_priced_analyses_are_ledgered_and_walled_at_the_boundary(
     (spend_isolation / "config" / "spend.toml").write_text(
         f"week_usd = {spent + 1000.0}\n"
     )
-    conversation = make_conversation(
-        "qwen3.6-35b-a3b-6bit", "sys", record_dir=tmp_path / "probe2"
-    )
+    conversation = make_conversation(served_card, "sys", record_dir=tmp_path / "probe2")
     conversation.add_user_text("Reply with the single word ok.")
     response = conversation.get_response(label="probe")
     assert response.text.strip()

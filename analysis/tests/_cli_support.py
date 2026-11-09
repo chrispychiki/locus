@@ -9,6 +9,9 @@ from _analysis_support import horizon_at, install_offline_count
 from _support import DISTILL, FIXTURE, read_recording
 from locus.evidence.db import connect
 
+# The local card the suites' deployment marks default.
+LOCAL_CARD = "qwen3.6-35b-a3b-6bit"
+
 
 @pytest.fixture(autouse=True)
 def offline_count(monkeypatch):
@@ -23,12 +26,10 @@ def offline_count(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def local_default_card(monkeypatch, tmp_path):
-    """The suite's deployment marks the local card `default = true`, so an analyze that names no model prices free and needs no key; a test of the Gemini declaration moves the mark itself."""
+    """The suite's deployment marks LOCAL_CARD `default = true`, so an analyze that names no model prices free and needs no key; a test of the Gemini declaration moves the mark itself."""
     from _analysis_support import remark_default
-    from locus.analysis.model import cards
 
-    local = cards.models_speaking(cards.OPENAI_COMPATIBLE)[0]
-    remark_default(monkeypatch, tmp_path, local, dirname="suite-cards")
+    remark_default(monkeypatch, tmp_path, LOCAL_CARD, dirname="suite-cards")
 
 
 @pytest.fixture(autouse=True)

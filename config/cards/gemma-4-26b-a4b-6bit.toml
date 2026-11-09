@@ -1,0 +1,30 @@
+# Field semantics: analysis/src/locus/analysis/model/cards.py.
+conversation = "openai-compatible"
+# The bundled mlx server reads `model`, `context_tokens`, `base_url`, and `thinking_markers` at
+# boot; an edit to them while a server is resident takes effect only at its next boot.
+# A request filling this context (260,421 prompt tokens with 398 screenshots, then 1,723 generated)
+# peaked at 32.2 GiB of live arrays on an M4 Pro Mac mini with 64 GB; the wired limit
+# (iogpu.wired_limit_mb) has to allow that.
+model = "mlx-community/gemma-4-26b-a4b-it-6bit"
+base_url = "http://127.0.0.1:8847/v1"
+family = "gemma4"
+# Tokens per screenshot, by kind, at any viewport, two marker tokens included: Gemma 4's trained
+# 560 and 1120 soft-token budgets. Activity-screenshots are cheap on purpose: the model pulls any
+# moment it needs to see in more detail at the pulled_screenshots value.
+image_tokens = { activity_screenshots = 562, pulled_screenshots = 1122 }
+# Gemma 4 thinks inside a channel block, opened and closed by these single tokens.
+thinking_markers = ["<|channel>", "<channel|>"]
+thinking_budget = 16384
+max_tokens = 24576
+context_tokens = 262144
+headroom = 0.8
+# Google's model card says a tool-call turn's thinking is kept: under preserve_thinking the
+# template renders every tool-call turn's thinking, where by default it drops all thinking before
+# the latest user message.
+chat_template_kwargs = { preserve_thinking = true }
+
+# The model's own generation_config.json values.
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 64

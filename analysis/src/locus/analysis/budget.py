@@ -22,7 +22,7 @@ from .select_screenshots import SCREENSHOT_INTERVAL_MS, screenshot_moments
 
 
 def image_geometry(model: str, width: int, height: int, tokens: int) -> tuple[int, int]:
-    """The pixel size of a screenshot of a `width` x `height` viewport on a local card whose image_tokens value for the screenshot's kind is `tokens`: the viewport scaled by one factor and rounded down onto the processor's grid (mlx/count.py grid), at the largest size whose cost in the server's own count, start and end markers included, fits the value. This is the only place that value becomes pixels: the renderer draws at this size, and pricing counts it. The processor encodes an on-grid image at its own size (mlx/count.py processed_size). A value the processor cannot produce raises: one below the cost of the smallest image it encodes, or above the cost of the largest it encodes at this viewport's proportions."""
+    """The pixel size of a screenshot of a `width` x `height` viewport on a local card whose image_tokens value for the screenshot's kind is `tokens`: the viewport scaled by one factor and rounded down onto the processor's grid (mlx/count.py grid), at the largest size the processor encodes as sent (mlx/count.py processed_size) whose cost in the server's own count, start and end markers included, fits the value. When even the smallest such size costs more than the value, it is that size, so what is drawn is always what is encoded: Qwen's least value, 66 tokens, gives 384x192 at a 1920x921 viewport, costing 74. This is the only place that value becomes pixels: the renderer draws at this size, and pricing counts it. The value lies within what the processor encodes, checked when it first sizes an image (mlx/count.py)."""
     from .mlx.count import grid, image_tokens, processed_size
 
     cell = grid(model)
@@ -34,25 +34,45 @@ def image_geometry(model: str, width: int, height: int, tokens: int) -> tuple[in
             max(cell, math.floor(height * scale / cell) * cell),
         )
 
-    def encoded(cells: int) -> bool:
-        # Checked before any cost is taken, so no image larger than the processor encodes is built.
-        size = scaled(cells)
-        sized = processed_size(model, *size)
-        return sized[0] * sized[1] >= size[0] * size[1]
+    def sized(cells: int) -> tuple[int, int]:
+        # Taken before any cost, so no image larger than the processor encodes is built.
+        return processed_size(model, *scaled(cells))
+
+    def enlarged(cells: int) -> bool:
+        encoded, size = sized(cells), scaled(cells)
+        return encoded[0] * encoded[1] > size[0] * size[1]
+
+    def as_sent(cells: int) -> bool:
+        return sized(cells) == scaled(cells)
 
     def fits(cells: int) -> bool:
-        return encoded(cells) and image_tokens(model, *scaled(cells)) <= tokens
+        return as_sent(cells) and image_tokens(model, *scaled(cells)) <= tokens
 
-    below = (
-        f"image_tokens {tokens} is below the cost of the smallest {width}x{height} "
-        f"screenshot the model's processor encodes without enlarging it; raise "
-        f"image_tokens in the card"
-    )
-    if not fits(1):
-        raise ValueError(below)
-    # Cost and pixel count both grow with the cell count, so doubling and then bisecting finds
-    # the largest count that fits.
-    low, high = 1, 2
+    # Pixel count grows with the cell count, and the processor enlarges a size under its least and
+    # shrinks one over its most, so the sizes it encodes as sent are one run of cell counts,
+    # starting after the last one it enlarges. Doubling then bisecting finds the start of the run,
+    # then the largest count in it whose cost, which also grows with the count, fits.
+    first = 1
+    if enlarged(first):
+        low, high = first, first * 2
+        while enlarged(high):
+            low, high = high, high * 2
+        while high - low > 1:
+            mid = (low + high) // 2
+            if enlarged(mid):
+                low = mid
+            else:
+                high = mid
+        first = high
+    if not as_sent(first):
+        raise ValueError(
+            f"{model}'s processor encodes no {width}x{height}-shaped size as sent: "
+            f"the first size it does not enlarge, {scaled(first)}, it encodes as "
+            f"{sized(first)}"
+        )
+    if not fits(first):
+        return scaled(first)
+    low, high = first, first * 2
     while fits(high):
         low, high = high, high * 2
     while high - low > 1:
@@ -61,17 +81,7 @@ def image_geometry(model: str, width: int, height: int, tokens: int) -> tuple[in
             low = mid
         else:
             high = mid
-    size = scaled(low)
-    if processed_size(model, *size) != size:
-        raise ValueError(below)
-    if not encoded(low + 1) and image_tokens(model, *size) < tokens:
-        raise ValueError(
-            f"image_tokens {tokens} is above the cost of the largest {width}x{height} "
-            f"screenshot the model's processor encodes: it shrinks anything larger "
-            f"than {size[0]}x{size[1]}, which costs {image_tokens(model, *size)}; "
-            f"lower image_tokens in the card to at most {image_tokens(model, *size)}"
-        )
-    return size
+    return scaled(low)
 
 
 class TallyConversation(Conversation):
@@ -162,7 +172,7 @@ class CostModel:
 
 
 def _local_count(model: str) -> Callable[..., list[Count]]:
-    """A local card's payload counted by its server's own code (mlx/count.py): the window composed into the real client, so the request is the one a run sends, with each activity-screenshot replaced by a blank image of the size the renderer will draw it at: the client's screenshot_size of the slice's viewport at that moment (slices.viewport_at). The count reads an image's size, not its pixels. The pulled kind is also sized at every viewport a pull could be drawn at, so a card value the processor cannot produce fails the price instead of a pull mid-run."""
+    """A local card's payload counted by its server's own code (mlx/count.py): the window composed into the real client, so the request is the one a run sends, with each activity-screenshot replaced by a blank image of the size the renderer will draw it at: the client's screenshot_size of the slice's viewport at that moment (slices.viewport_at). The count reads an image's size, not its pixels."""
 
     def one(conn, window, contract, moments, site_contexts) -> Count:
         import tempfile
@@ -180,14 +190,6 @@ def _local_count(model: str) -> Callable[..., list[Count]]:
         viewports = {
             s.slice_id: viewport_events(conn, s.slice_id) for s in window.slices
         }
-        for s in window.slices:
-            events = viewports[s.slice_id]
-            for ts in [s.screenshot_start_ts] + [
-                e["timestamp"]
-                for e in events
-                if s.screenshot_start_ts < e["timestamp"] <= s.end_ts
-            ]:
-                conv.screenshot_size(*viewport_at(events, ts), pushed=False)
         with tempfile.TemporaryDirectory(prefix="locus_price_") as tmp:
             shots = {}
             for slice_id, timestamps in moments.items():
