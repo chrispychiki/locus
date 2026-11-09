@@ -6,10 +6,11 @@ buffer grows with the request's total pixels, and past the machine's wired headr
 an uncatchable Metal command-buffer OOM that kills the server process.
 
 The bound is at the encode itself: the batch is partitioned into contiguous whole-image chunks
-whose pixel sum stays within LOCUS_MLX_ENCODE_CHUNK_MPX, each chunk runs upstream's own
-__call__ with the outputs materialized and the allocator cache released between chunks, and the
-per-chunk outputs concatenate. An image is never split; a single image over the budget encodes
-alone (the preprocessor caps one image at 16.7 Mpx).
+whose pixel sum stays within the processor's pixel limit (count.pixel_limit), each chunk runs
+upstream's own __call__ with the outputs materialized and the allocator cache released between
+chunks, and the per-chunk outputs concatenate. An image is never split, so one image at that
+limit sets the floor of the peak, and a bigger budget only raises it; an image a request's own
+min_pixels sizes past the limit encodes alone.
 
 Chunking is output-identical to the unchunked encode on the pinned upstream source: patch
 embedding, position-embedding interpolation, and the mergers are per-image (or per-token)
@@ -28,21 +29,9 @@ server path and the vision-feature-cache path both (the cache stores this functi
 which chunking does not change).
 """
 
-import os
-
-DEFAULT_CHUNK_MPX = 16.0
-
 EXPECTED_CALL_SHA256 = (
     "31a29bbfcf8c415894dd66b137f9f71e4d4de210d9617753491d20e5dbebc8d4"
 )
-
-
-def _budget_pixels(budget_mpx: float | None) -> float:
-    if budget_mpx is None:
-        budget_mpx = float(
-            os.environ.get("LOCUS_MLX_ENCODE_CHUNK_MPX", DEFAULT_CHUNK_MPX)
-        )
-    return budget_mpx * 1e6
 
 
 def chunk_rows(rows, patch_pixels, budget_pixels):
@@ -62,9 +51,10 @@ def chunk_rows(rows, patch_pixels, budget_pixels):
     return groups
 
 
-def install_vision_encode_chunking(budget_mpx: float | None = None) -> None:
-    """Replace qwen3_vl VisionModel.__call__ with the pixel-chunked equivalent. On upstream
-    source drift it refuses to boot (patching.py owns that policy)."""
+def install_vision_encode_chunking(budget: int) -> None:
+    """Replace qwen3_vl VisionModel.__call__ with the equivalent encoding chunks of at most
+    `budget` pixels, an image over the budget alone. On upstream source drift it refuses to boot
+    (patching.py owns that policy)."""
     from mlx_vlm.models.qwen3_vl.vision import VisionModel
 
     from .patching import expect_source
@@ -80,7 +70,6 @@ def install_vision_encode_chunking(budget_mpx: float | None = None) -> None:
 
     import mlx.core as mx
 
-    budget = _budget_pixels(budget_mpx)
     original = VisionModel.__call__
 
     def chunked(self, hidden_states, grid_thw, **kwargs):

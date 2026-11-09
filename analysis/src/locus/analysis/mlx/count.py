@@ -2,7 +2,7 @@
 
 A chat-completions request's prompt_tokens is decided on the CPU before the GPU sees anything: upstream renders the model's chat template over the request and runs the model's processor over it and its images (server/openai.py chat_completions_endpoint into server/generation.py _cpu_preprocess). prompt_tokens() runs those same steps through upstream's own functions, as the server patches them (chat_turns.py), on the model's processor and config loaded without its weights, under the environment the server serves the model under (serve.serving_env), so a local card's count is the server's count by construction — offline, nothing booted, no copy of the template, the tokenizer or the image arithmetic kept here. Where the server preprocesses a request's images all at once, the count takes each distinct image size once (prompt_tokens says why that is the same number), so what it holds does not grow with the number of images.
 
-The steps follow upstream's chat handler, load and preprocessing, and the shortcut and the sizing (grid, processed_size) rest on the model's processor, so all are pinned to their source like every upstream-keyed patch (patching.py): a changed source refuses until the steps are re-checked against it.
+The steps follow upstream's chat handler, load and preprocessing, and the shortcut and the sizing (grid, processed_size, pixel_limit) rest on the model's processor, so all are pinned to their source like every upstream-keyed patch (patching.py): a changed source refuses until the steps are re-checked against it.
 """
 
 import functools
@@ -85,7 +85,7 @@ JUDGED_PROCESSORS = {
     ),
 }
 
-OWES = "Re-check prompt_tokens' steps and the image processor's sizing that grid and processed_size read against the new source and re-pin (analysis/src/locus/analysis/mlx/count.py)."
+OWES = "Re-check prompt_tokens' steps and the image processor's sizing that grid, processed_size and pixel_limit read against the new source and re-pin (analysis/src/locus/analysis/mlx/count.py)."
 
 
 def _verify_upstream() -> None:
@@ -149,7 +149,7 @@ def _verify_upstream() -> None:
 
 
 def _verify_processor(processor) -> None:
-    """Refuse unless both the processor, whose expansion the shortcut rests on, and its image processor, whose sizing grid and processed_size read, are classes of a judged module at its judged source."""
+    """Refuse unless both the processor, whose expansion the shortcut rests on, and its image processor, whose sizing grid, processed_size and pixel_limit read, are classes of a judged module at its judged source."""
     import importlib
 
     for held in (processor, processor.image_processor):
@@ -449,6 +449,24 @@ def processed_size(model: str, width: int, height: int) -> tuple[int, int]:
             max_pixels=options.get("max_pixels"),
         )
         return sized_width, sized_height
+
+
+@functools.cache
+def pixel_limit(model: str) -> int:
+    """The pixel limit the model's processor sizes images under in the serving env, floored to whole cells of its grid. A request that sets its own min_pixels can have an image encoded past it."""
+    cell = grid(model)
+    with _serving(model):
+        _, _, _, options = _render(_one_image_request(model))
+        processor, _ = _resources(model)
+        limit = dict(options).get("max_pixels")
+        if limit is None:
+            limit = processor.image_processor.max_pixels
+    if limit < cell**2:
+        raise ValueError(
+            f"{model}'s processor pixel limit {limit} is under one {cell}x{cell} cell of its "
+            f"grid, so no image encodes under it — check the serving env's MLX_VLM_MAX_PIXELS"
+        )
+    return limit // cell**2 * cell**2
 
 
 @functools.cache

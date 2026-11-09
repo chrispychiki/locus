@@ -4,6 +4,8 @@ import asyncio
 import os
 import socket
 import subprocess
+import sys
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -1360,11 +1362,49 @@ def test_the_boot_refuses_a_count_setting_only_its_shell_holds(monkeypatch):
         serve.main()
 
 
+BOOT_UNTIL_SERVING = """
+import sys
+import mlx.core as mx
+from locus.analysis.mlx import serve
+
+serve.install_log_handler = lambda: None
+serve._wired_cap_bytes = lambda: 2**30
+mx.set_wired_limit = lambda cap: None
+mx.set_memory_limit = lambda cap: None
+
+def serving(app, port, host):
+    print("serving")
+
+serve.serve_guarded = serving
+sys.argv = ["locus-mlx-serve", sys.argv[1]]
+serve.main()
+"""
+
+
+def test_the_boot_reads_the_encode_cap_and_installs_every_patch_for_real():
+    """The boot in a process of its own, every patch installed and the encode cap read through the count, the model's files from this machine's Hugging Face cache; only the GPU limits and serving are stubbed. The count verifies upstream's unpatched source, so a patch applied before the cap is read refuses this boot."""
+    slug = "qwen3.6-35b-a3b-6bit"
+    env = {**os.environ, **serve.serving_env(slug), "HF_HUB_OFFLINE": "1"}
+    done = subprocess.run(
+        [sys.executable, "-c", BOOT_UNTIL_SERVING, slug],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=Path(__file__).resolve().parents[4],
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().endswith("serving")
+
+
 def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
     """Each patch is proven where it lives; this proves the boot runs every one of them before the server takes a request, so a dropped install call cannot pass the suite."""
     import mlx.core as mx
+    import mlx_vlm.utils as mlx_utils
     from locus.analysis.mlx import (
         chat_turns,
+        count,
         fused_attention,
         presence_penalty,
         vision_chunking,
@@ -1399,6 +1439,8 @@ def test_the_boot_installs_every_patch_before_it_serves(monkeypatch):
     monkeypatch.setattr(mx, "set_wired_limit", lambda cap: None)
     monkeypatch.setattr(mx, "set_memory_limit", lambda cap: None)
     monkeypatch.setattr(server_app, "add_middleware", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mlx_utils, "get_model_path", lambda repo, **kwargs: None)
+    monkeypatch.setattr(count, "pixel_limit", lambda model: 4096 * 4096)
     monkeypatch.setattr(serve.sys, "argv", ["locus-mlx-serve", slug])
 
     serve.main()

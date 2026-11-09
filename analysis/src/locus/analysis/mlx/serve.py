@@ -11,7 +11,7 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
 - the chat template reads a tool message's images, an assistant answer's reasoning and the request's template options, but upstream drops the first two before the template and gives a request no way to pass the third (chat_template_kwargs).
   Patched here: chat_turns.install_chat_turns carries all three to the template.
 - a request's images encode in one batch, so the vision-encode transient scales with the request's total pixels and no token-denominated guard bounds it — a large enough image batch aborts the server even when it fits the token context (MAX_KV_SIZE counts expanded vision tokens, so its guard doesn't close this).
-  Patched here: vision_chunking.install_vision_encode_chunking encodes in pixel-bounded chunks, output-identical on the pinned upstream.
+  Patched here: vision_chunking.install_vision_encode_chunking encodes in chunks of at most the processor's pixel limit (count.pixel_limit), an image a request's own min_pixels sizes past it alone, output-identical on the pinned upstream.
 - on GPUs without neural accelerators, mlx reads a multi-token chunk of a head-dim-256 model by materializing its whole score table, so prefill memory grows with the prompt (16 GiB per 2,048-token chunk at 256k keys).
   Patched here: fused_attention.install_fused_attention has Qwen's attention ask mlx for its fused kernel, which never holds the table.
 - the GPU loop keeps a request's pixel arrays referenced after encoding them, through the request's prefill and decode and until the next request arrives (over 1 GiB for 47k image tokens).
@@ -767,15 +767,25 @@ def main() -> None:
         f"Serving {hf_repo} ({slug}) via upstream mlx_vlm.server on {host}:{port} (card base_url)"
     )
 
+    # The encode cap is read through the count, which verifies upstream's unpatched source, so it
+    # is read before any patch below. It needs the model's config and processor files alone; the
+    # weights load later, behind the one-resident guard.
+    from mlx_vlm.utils import get_model_path
+
+    from .count import MODEL_FILES, pixel_limit
+
+    get_model_path(hf_repo, allow_patterns=MODEL_FILES)
+    encode_chunk = pixel_limit(hf_repo)
+
     install_heif_decode()
     install_preprocess_serializer()
     install_pixel_release()
 
     from .vision_chunking import install_vision_encode_chunking
 
-    install_vision_encode_chunking()
+    install_vision_encode_chunking(encode_chunk)
     logger.info(
-        "vision-encode chunking installed: a request's images encode in pixel-bounded chunks (LOCUS_MLX_ENCODE_CHUNK_MPX)"
+        f"vision-encode chunking installed: a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit; an image a request's own min_pixels sizes past it encodes alone"
     )
 
     from .fused_attention import install_fused_attention

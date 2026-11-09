@@ -101,6 +101,32 @@ def test_the_processor_sizes_by_its_own_rule():
     )
 
 
+def _pixel_limit_under(monkeypatch, max_pixels):
+    from locus.analysis.mlx import serve
+
+    declared = serve.serving_env
+    monkeypatch.setattr(
+        serve,
+        "serving_env",
+        lambda slug: {**declared(slug), "MLX_VLM_MAX_PIXELS": str(max_pixels)},
+    )
+    count.pixel_limit.cache_clear()
+    try:
+        return count.pixel_limit(MODEL)
+    finally:
+        count.pixel_limit.cache_clear()
+
+
+def test_the_pixel_limit_is_the_processors_floored_to_whole_cells(monkeypatch):
+    assert count.pixel_limit(MODEL) == 4096 * 4096
+    assert _pixel_limit_under(monkeypatch, 100 * 1024 + 500) == 100 * 1024
+
+
+def test_a_pixel_limit_under_one_cell_fails_loud(monkeypatch):
+    with pytest.raises(ValueError, match="under one 32x32 cell"):
+        _pixel_limit_under(monkeypatch, 100)
+
+
 def test_a_value_the_processor_cannot_produce_fails_loud():
     for value in (10, count.image_tokens(MODEL, 32, 32)):
         with pytest.raises(ValueError, match="below the cost"):

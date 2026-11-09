@@ -62,23 +62,13 @@ class TestInstall:
         monkeypatch.setattr(vc, "EXPECTED_CALL_SHA256", "0" * 64)
         before = VisionModel.__call__
         with pytest.raises(SystemExit, match="upstream drift"):
-            install_vision_encode_chunking()
+            install_vision_encode_chunking(4096 * 4096)
         assert VisionModel.__call__ is before
 
     def test_installs_against_the_pinned_upstream(self):
         before = VisionModel.__call__
-        install_vision_encode_chunking()
+        install_vision_encode_chunking(4096 * 4096)
         assert VisionModel.__call__ is not before
-
-    def test_explicit_budget_beats_the_environment(self, monkeypatch):
-        monkeypatch.setenv("LOCUS_MLX_ENCODE_CHUNK_MPX", "7.5")
-        assert vc._budget_pixels(None) == 7.5e6
-        assert vc._budget_pixels(2.0) == 2.0e6
-
-    def test_default_budget_reflects_the_measured_slope(self):
-        # ~0.25 GiB of transient per Mpx: the default bounds the encode spike to ~4 GiB.
-        assert vc._budget_pixels(None) == vc.DEFAULT_CHUNK_MPX * 1e6
-        assert 2.0 <= vc.DEFAULT_CHUNK_MPX * 0.25 <= 8.0
 
 
 def tiny_vision_model():
@@ -117,7 +107,7 @@ class TestOutputIdentity:
         mx.eval(merged_ref, *deep_ref)
 
         # A budget of one row's pixels forces every image into its own chunk.
-        install_vision_encode_chunking(budget_mpx=4 * 4 * PATCH_PIXELS / 1e6)
+        install_vision_encode_chunking(4 * 4 * PATCH_PIXELS)
         merged, deep = model(pixels, grid)
         mx.eval(merged, *deep)
 
@@ -136,7 +126,7 @@ class TestOutputIdentity:
         merged_ref, deep_ref = VisionModel.__call__(model, pixels, grid)
 
         # Budget of two small rows: groups land as [2 rows][1 row][1 row].
-        install_vision_encode_chunking(budget_mpx=2 * 4 * 4 * PATCH_PIXELS / 1e6)
+        install_vision_encode_chunking(2 * 4 * 4 * PATCH_PIXELS)
         merged, deep = model(pixels, grid)
 
         assert mx.allclose(merged, merged_ref, atol=1e-5, rtol=1e-5)
@@ -150,7 +140,7 @@ class TestOutputIdentity:
         pixels, grid = patch_input(rows, seed=3)
         merged_ref, deep_ref = VisionModel.__call__(model, pixels, grid)
 
-        install_vision_encode_chunking(budget_mpx=0.000001)
+        install_vision_encode_chunking(1)
 
         def never(*args, **kwargs):
             raise AssertionError("single-image call consulted the chunker")
