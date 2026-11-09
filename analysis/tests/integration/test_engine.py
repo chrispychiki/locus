@@ -94,7 +94,7 @@ def _wire(monkeypatch, conv, context_tokens=10_000_000):
     return model
 
 
-_WIRE_RECORD = re.compile(r"\d+_.+_(input\.txt|response\.txt|meta\.json)")
+_WIRE_RECORD = re.compile(r"\d+_.+_(input\.txt|response\.txt|thoughts\.txt|meta\.json)")
 
 
 def _strays(out):
@@ -1185,9 +1185,8 @@ def test_a_bare_citation_in_a_labeled_window_gets_repaired(
 
 def test_the_answer_is_the_record_itself(monkeypatch, distilled_db, tmp_path):
     """The answer is the record itself: the final response transcript with the
-    contract's meta section in place — nothing carved into a side file, nothing
-    assembled beside the record, so the model's whole utterance sits on the
-    read path."""
+    contract's meta section in place, thoughts in that call's thoughts file —
+    nothing assembled beside the record."""
     conn = connect(distilled_db)
     slice_id = best_slice(conn)
     reply = f"{ANSWER}\n\n{META_HEADER}\n- The projection cut off mid-table on the second snapshot.\n"
@@ -1209,9 +1208,10 @@ def test_the_answer_is_the_record_itself(monkeypatch, distilled_db, tmp_path):
     assert META_HEADER in answer and "cut off mid-table" in answer, (
         "the meta section stays in place in the one record"
     )
-    assert "the cursor hesitates here" in answer, (
-        "thoughts the backend exposes ride the record"
-    )
+    assert "the cursor hesitates here" not in answer
+    assert (out / "1_answer_thoughts.txt").read_text() == (
+        "the cursor hesitates here\n"
+    ), "thoughts the backend exposes go in that call's thoughts file"
     assert not _strays(out), (
         "the directory is the record — the manifest, the wire transcripts, screenshots/ — with nothing assembled beside it"
     )

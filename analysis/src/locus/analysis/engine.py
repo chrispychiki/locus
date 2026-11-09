@@ -52,10 +52,11 @@ Screenshots live and die inside this call; the return value is a manifest of
 paths and counts — no image bytes cross back to the caller. One invocation is
 one window, one conversation, one analysis directory: window.json (the machine
 manifest — question, clock anchor, slice table), the full wire transcripts (the
-final answer-labeled response is the answer, thoughts and the contract's meta
-section in place as the wire returned them), and screenshots/. The directory is the
-evidence. Nothing is assembled: the record is the deliverable, and the manifest
-names the final response's path.
+final answer-labeled response is the answer, the contract's meta section in
+place as the wire returned it, thoughts the backend exposed in that call's
+thoughts file), and screenshots/. The directory is the evidence. Nothing is
+assembled: the record is the deliverable, and the manifest names the final
+response's path.
 """
 
 import json
@@ -439,7 +440,7 @@ def run_analysis(
     The model-payload is priced and refused loud (PayloadOverflow, price attached) when it does not fit the card's context — nothing is ever cut or split for the caller.
     An analysis on a priced model also stands under the deployment's declared spend caps (config/spend.toml): the wall is enforced at the conversation layer before every billed call, and asked once up front here so a capped deployment refuses in milliseconds instead of after minutes of rendering.
 
-    The directory holds window.json (the question, the window's absolute clock anchor, the slice table), the wire transcripts — the final answer-labeled response is the answer, thoughts and the contract's meta section in place as the wire returned them — and screenshots/. The model reads one shared window clock; a pulled moment is a window offset plus — when the window is multi-slice — the label of the slice it belongs to, resolved through the slice table. A request outside its slice's recording is failed back to the model in the tool's own channel; a moment inside the recording but ahead of the covering snapshot — where no DOM was yet captured — serves the snapshot's own instant, stamped with the moment actually shown."""
+    The directory holds window.json (the question, the window's absolute clock anchor, the slice table), the wire transcripts — the final answer-labeled response is the answer, the contract's meta section in place as the wire returned it, thoughts the backend exposed in that call's thoughts file — and screenshots/. The model reads one shared window clock; a pulled moment is a window offset plus — when the window is multi-slice — the label of the slice it belongs to, resolved through the slice table. A request outside its slice's recording is failed back to the model in the tool's own channel; a moment inside the recording but ahead of the covering snapshot — where no DOM was yet captured — serves the snapshot's own instant, stamped with the moment actually shown."""
     if declared_pricing(model):
         check_walls()
     price = price_analysis(

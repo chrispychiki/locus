@@ -6,9 +6,9 @@ The backend, by its card, decides how an image is sent; the caller states only w
 
 A caller that wants to know what an image will cost, or how much context is left to spend, asks the backend — image_tokens and context_remaining are the wire's own arithmetic, so an agentic caller serves what fits and refuses the rest against a number that is true at the moment it acts.
 
-The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes three files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt and every part verbatim in order, roles delimited, each earlier assistant turn's thoughts under its own heading as the backend exposed them, images as inline pointer lines carrying the image's path and the remote reference actually sent), N_response.txt (the reply, with thoughts inline and delimited when present), N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten. response_text() inverts the response file's format, so a reader of the record recovers exactly the reply text.
+The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes its files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt and every part in order, roles delimited, text verbatim, images as inline pointer lines carrying the image's path and the remote reference actually sent, each earlier assistant turn's thoughts as a pointer line linking that call's thoughts file), N_response.txt (the reply), N_thoughts.txt when the backend exposed thoughts, N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response, thoughts and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten.
 
-Image pointers are written relative to the payload file that carries them, so they resolve from where they sit and the record directory holding them stays portable.
+Pointers are written relative to the payload file that carries them, so they resolve from where they sit and the record directory holding them stays portable.
 
 Spend governance rides the same template method: a backend that declares its per-token prices (_billing) has every generation call checked against the deployment's declared spend walls before the request goes to the wire and appended to the spend ledger from its persisted usage after — so a billed backend cannot run outside the walls or off the ledger, the same way no model-bound conversation can run unrecorded. A refused call still leaves its input and its meta with the refusal; a call that fails after the wire reported usage (UnusableReply) lands that usage in its meta and on the ledger, because a failure must never read as less spend. The walls, the ledger, and the arithmetic are spend.py's.
 """
@@ -113,21 +113,6 @@ def json_schema_of(response_schema: Any) -> dict:
             "response_schema produced an empty JSON schema — pass a concrete type, never Any"
         )
     return schema
-
-
-def reply_record(response: "Response") -> str:
-    """A response rendered in the record's reply format — thoughts delimited when the backend exposed them, otherwise the text alone. This is the one written form of a model's utterance: _persist_result writes every N_response.txt with it, and response_text() inverts it."""
-    if response.thoughts_text:
-        return f"=== thoughts ===\n{response.thoughts_text}\n\n=== response ===\n{response.text}"
-    return response.text
-
-
-def response_text(recorded: str) -> str:
-    """The reply text back out of the record's reply format — the inverse of reply_record, kept beside the writer so the two halves cannot drift. A response with thoughts is delimited; without, the file is the text plus the trailing newline the persistence layer guarantees."""
-    body = recorded.removesuffix("\n")
-    if body.startswith("=== thoughts ===\n"):
-        _, _, body = body.partition("\n\n=== response ===\n")
-    return body
 
 
 def latest_answer_response(record_dir: Path) -> Path:
@@ -332,18 +317,21 @@ class Conversation(ABC):
                     f"(label={label!r}; {error!r}); the full response is in "
                     f"the persisted payloads"
                 ) from error
+        thoughts_name = (
+            f"{stem}_thoughts.txt" if response.thoughts_text and stem else ""
+        )
         if response.tool_calls:
             self._record.append(
                 (
                     "assistant_tool_calls",
                     response.tool_calls,
                     response.text,
-                    response.thoughts_text,
+                    thoughts_name,
                 )
             )
             self._open_calls.update(call.id for call in response.tool_calls)
         elif response.text:
-            self._record.append(("assistant", response.text, response.thoughts_text))
+            self._record.append(("assistant", response.text, thoughts_name))
         self._last_usage_total = self._usage_total(response.usage_metadata)
         self._record_at_response = len(self._record)
         return response
@@ -486,7 +474,7 @@ class Conversation(ABC):
                 emit("tool", "\n".join(lines))
             elif entry[0] == "assistant_tool_calls":
                 if entry[3]:
-                    emit("assistant thoughts", entry[3])
+                    emit("assistant thoughts", f"[{entry[3]}]({entry[3]})")
                 calls = "\n".join(
                     f"[tool_call id={c.id} {c.name}({json.dumps(c.arguments)})]"
                     for c in entry[1]
@@ -494,7 +482,7 @@ class Conversation(ABC):
                 emit("assistant", (f"{entry[2]}\n{calls}" if entry[2] else calls))
             else:
                 if entry[2]:
-                    emit("assistant thoughts", entry[2])
+                    emit("assistant thoughts", f"[{entry[2]}]({entry[2]})")
                 emit("assistant", entry[1])
         self._persist_write(stem, "input.txt", "\n\n".join(sections))
         return stem
@@ -513,7 +501,9 @@ class Conversation(ABC):
         if stem is None:
             return
         if response is not None:
-            self._persist_write(stem, "response.txt", reply_record(response))
+            self._persist_write(stem, "response.txt", response.text)
+            if response.thoughts_text:
+                self._persist_write(stem, "thoughts.txt", response.thoughts_text)
 
         self._persist_write(
             stem,

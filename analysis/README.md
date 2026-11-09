@@ -20,12 +20,13 @@ analyses/{utc-stamp}_{visitor}-{disambiguator}[_plusN]/  one analysis: occasion,
     analysis.log                                     everything the run said as it went
     window.json                                      the machine manifest — question, clock anchor, slice table
     N_answer_input.txt  N_answer_response.txt  N_answer_meta.json
+    N_answer_thoughts.txt                            when the backend exposed the call's thoughts
     screenshots/{label}_{activity|pulled}_screenshot_{ms}.png
 ```
 
-The answer is the record itself: the final `N_answer_response.txt` — thoughts where the backend exposes them, the meta section addressed to whoever tunes the system when the model wrote one, and the cited answer, exactly as the wire returned them — with `window.json` carrying everything a reader wants beside it: the question, the absolute clock the cited offsets anchor to, and the slice table.
+The answer is the record itself: the final `N_answer_response.txt` — the cited answer and, when the model wrote one, the meta section addressed to whoever tunes the system, exactly as the wire returned them. Thoughts the backend exposed go in that call's `N_answer_thoughts.txt`. `window.json` carries everything a reader wants beside the answer: the question, the absolute clock the cited offsets anchor to, and the slice table.
 
-Every model call leaves three files in the analysis dir: `N_<label>_input.txt` (the entire interpolated input as sent, roles delimited, images as markdown links resolving from where the file sits), `N_<label>_response.txt` (thoughts inline, delimited), `N_<label>_meta.json` (config, usage, wall-clock elapsed, error). Persistence lives at the wire in the conversation layer and is never optional — a conversation states its record home at construction, so every backend and every caller inherits the record, failed calls included.
+Every model call leaves its files in the analysis dir: `N_<label>_input.txt` (the entire interpolated input as sent, roles delimited, images as markdown links resolving from where the file sits, each earlier assistant turn's thoughts as a link to that call's thoughts file), `N_<label>_response.txt` (the reply), `N_<label>_thoughts.txt` when the backend exposed thoughts, `N_<label>_meta.json` (config, usage, wall-clock elapsed, error). Persistence lives at the wire in the conversation layer and is never optional — a conversation states its record home at construction, so every backend and every caller inherits the record, failed calls included.
 
 ## Model backends
 

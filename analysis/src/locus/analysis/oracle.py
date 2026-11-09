@@ -16,15 +16,13 @@ from pathlib import Path
 from .ground.evaluate import evaluate_answer, judged_claims
 from .ground.prompts import SET_A
 from .model.factory import make_conversation
-from .model.protocol import latest_answer_response, response_text
+from .model.protocol import latest_answer_response
 from .prompts import split_meta
 
 
 def _analysis_answer(analysis_dir: Path) -> str:
-    """An analysis's answer is its transcript's final answer-labeled response — the model's own last word, thoughts stripped, the contract's meta channel excluded (it is the model's words to the tuner, not claims about the session)."""
-    return split_meta(response_text(latest_answer_response(analysis_dir).read_text()))[
-        0
-    ]
+    """An analysis's answer is its transcript's final answer-labeled response, without the contract's meta channel (the model's words to the tuner, not claims about the session)."""
+    return split_meta(latest_answer_response(analysis_dir).read_text())[0]
 
 
 def evaluate_analysis(

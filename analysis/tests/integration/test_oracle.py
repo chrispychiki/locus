@@ -42,13 +42,10 @@ def _make_analysis(
         )
     )
     if transcript:
-        body = (
-            answer
-            if thoughts is None
-            else f"=== thoughts ===\n{thoughts}\n\n=== response ===\n{answer}"
-        )
         (analysis_dir / "1_answer_input.txt").write_text("=== user ===\n\nevidence\n")
-        (analysis_dir / "1_answer_response.txt").write_text(body + "\n")
+        (analysis_dir / "1_answer_response.txt").write_text(answer + "\n")
+        if thoughts is not None:
+            (analysis_dir / "1_answer_thoughts.txt").write_text(thoughts + "\n")
     return analysis_dir
 
 
@@ -104,8 +101,8 @@ def test_oracle_scores_the_analysis_and_lands_in_grounding(distilled_db, tmp_pat
 
 
 def test_the_oracle_reads_the_answer_from_the_transcript(distilled_db, tmp_path):
-    """The answer is the transcript's final response — the oracle judges what
-    the model actually wrote, thoughts stripped."""
+    """The answer is the transcript's final response — the oracle judges the
+    reply, not the thoughts file beside it."""
     conn = connect(distilled_db)
     analysis_dir = _make_analysis(
         conn, tmp_path, answer="the cited answer", thoughts="let me think"

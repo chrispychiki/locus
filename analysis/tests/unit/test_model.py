@@ -277,9 +277,8 @@ def test_persisted_calls_capture_the_full_payload_as_sent(tmp_path):
         '![image_1.png](../../image_1.png "sent as remote://image_1.png")' in first
     ), "the pointer resolves from the payload file that carries it"
     assert "revise please" not in first
-    assert (payloads / "1_answer_response.txt").read_text() == (
-        "=== thoughts ===\nthinking…\n\n=== response ===\nanswer one\n"
-    )
+    assert (payloads / "1_answer_response.txt").read_text() == "answer one\n"
+    assert (payloads / "1_answer_thoughts.txt").read_text() == "thinking…\n"
     meta = json.loads((payloads / "1_answer_meta.json").read_text())
     assert meta["config"]["execution_mode"] == "test"
     assert meta["usage"] == {"total_tokens": 9}
@@ -288,11 +287,13 @@ def test_persisted_calls_capture_the_full_payload_as_sent(tmp_path):
 
     second = (payloads / "2_revision_input.txt").read_text()
     assert (
-        "=== assistant thoughts ===\n\nthinking…\n\n=== assistant ===\n\nanswer one"
+        "=== assistant thoughts ===\n\n[1_answer_thoughts.txt](1_answer_thoughts.txt)\n\n=== assistant ===\n\nanswer one"
         in second
-    ), "the model carries its earlier reasoning, so the record shows it"
+    ), "the input links the earlier turn's thoughts file"
+    assert "thinking…" not in second
     assert second.rstrip().endswith("revise please")
     assert (payloads / "2_revision_response.txt").read_text() == "answer two\n"
+    assert not (payloads / "2_revision_thoughts.txt").exists()
 
 
 def test_record_collision_refuses_before_the_wire(tmp_path):
@@ -1178,9 +1179,11 @@ def test_local_tool_call_turn_replays_its_reasoning(tmp_path):
     stem = conversation._persist_input("answer")
     record = (tmp_path / "r" / f"{stem}_input.txt").read_text()
     assert (
-        "=== assistant thoughts ===\n\nlook at the form at 2s\n\n=== assistant ==="
+        "=== assistant thoughts ===\n\n[1_thoughts.txt](1_thoughts.txt)\n\n=== assistant ==="
         in record
     )
+    assert "look at the form at 2s" not in record
+    assert (tmp_path / "r" / "1_thoughts.txt").read_text() == "look at the form at 2s\n"
 
 
 def test_local_tool_reply_carries_its_screenshots_in_order(tmp_path):
@@ -2334,7 +2337,10 @@ def test_gemini_thoughts_are_read_from_thought_steps(tmp_path):
     response = conversation.get_response(label="answer")
     assert response.thoughts_text == "let me look"
     persisted = (tmp_path / "payloads" / "1_answer_response.txt").read_text()
-    assert "=== thoughts ===\nlet me look" in persisted
+    assert persisted == "the answer\n"
+    assert (tmp_path / "payloads" / "1_answer_thoughts.txt").read_text() == (
+        "let me look\n"
+    )
 
 
 def test_a_failed_interaction_status_is_loud(tmp_path):
@@ -2504,14 +2510,6 @@ def test_a_model_bound_backend_cannot_be_built_without_a_record_home(tmp_path):
         GeminiConversation(
             GEMINI, "sys", dry_run=True, cache_path=tmp_path / "cache.db"
         )
-
-
-def test_response_text_inverts_the_persisted_response_format():
-    from locus.analysis.model.protocol import response_text
-
-    assert response_text("just the answer\n") == "just the answer"
-    recorded = "=== thoughts ===\nhmm let me think\n\n=== response ===\nthe actual answer\nsecond line\n"
-    assert response_text(recorded) == "the actual answer\nsecond line"
 
 
 def test_sdk_retry_waits_narrate_to_stderr_once(capsys):
