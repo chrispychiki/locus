@@ -17,34 +17,34 @@ from .patching import expect_source, refuse
 MODEL_FILES = ["*.json", "*.jsonl", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja"]
 
 EXPECTED_CHAT_HANDLER_SHA256 = (
-    "74c05a1d1cf9b115f6ae23a997feb3202c2853ee972620eb58c32424a7e7dc03"
+    "f94a064abb6e43d73f57021068b9d6ce413646f716a89f57a99622be4e7debc8"
 )
 EXPECTED_CPU_PREPROCESS_SHA256 = (
     "987ac63286683d76cab4e84a32cf74a8da572ac2dbe63674092fbe7780e8781b"
 )
 EXPECTED_LOAD_SHA256 = (
-    "de9dfe44dbc77f4ca3086433614a99a9936f2985eea5e26de0360e28f7762509"
+    "643df673d4477369118888c1402eae8997de9add18fb5589ef21b01329cd1574"
 )
 EXPECTED_LOAD_MODEL_SHA256 = (
-    "27e77d26d0b5254ba7ddc8edf5eb6312ad61e46d93b138d04c09db0f9649f6a4"
+    "eb56291c006f93e7412c68a3420564f202084592d6ddd466fbcbfef97214faf6"
 )
 EXPECTED_LOAD_MODEL_RESOURCES_SHA256 = (
-    "7474f492b3efce35614b8caf5b3a4980f92ef6df78148128614bdc4feb39934f"
+    "a0ebe7f67733c94c81df0cf5a43cb57c8b4c835dd9a58b3fc9b237b6c0820da6"
 )
 EXPECTED_GET_MODEL_PATH_SHA256 = (
-    "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499"
+    "d9f63cd47b42cb81a2878b99d906b26c7399ab79fb0a82816b2d08e5b44647f9"
 )
 EXPECTED_PREPARE_INPUTS_SHA256 = (
-    "51cdb24efbcfb28c690f0566f7859d8f7a4c9351b50dc85fec85976e29de5fe7"
+    "82ac8cda529ea156f0bf595c7e815df8385d81b08daf8e16dba81817964f872b"
 )
 EXPECTED_GEN_ARGS_SHA256 = (
-    "abd877df1489b9295d0efc47ca433672796dc35f637f7cebc78f3220f0c53d5a"
+    "83194fd3d231d2f1682b18ba2107e8a91529b32c8d141d7c2b4bbb6605964dc3"
 )
 EXPECTED_APP_GEN_ARGS_SHA256 = (
     "7860eff939ba38b903bf9573d6d5c8d6d9d62bb59f141a6934648d52680c20b9"
 )
 EXPECTED_LOAD_IMAGE_SHA256 = (
-    "96b3ed78540f0e2bf7719f27166d1ef4cfd25ba6e9d2b3a909a718454e1c9bc9"
+    "292442f163ac4d5001824a7905735e8024a2a2f42460794d7ba656c708f1411c"
 )
 # Every environment variable the count's upstream steps read that can change a count, by the
 # reader it reaches upstream through: the image pixel limits (also in the runtime config), the
@@ -84,11 +84,11 @@ EXPECTED_RUNTIME_FROM_ENV_SHA256 = (
 JUDGED_PROCESSORS = {
     "qwen3": (
         "mlx_vlm.models.qwen3_vl.processing_qwen3_vl",
-        "9c6bc521ea6b45c3346967502f2d0b69697371327d7b340c23650e76de91f5d2",
+        "bbd3c89872bef5741865ba8397aad184466cdf5a36d84c0b0a48cc5bb5f5fb5d",
     ),
     "gemma4": (
         "mlx_vlm.models.gemma4.processing_gemma4",
-        "940cb231e4b922714285276ac97ab7ea2ddf8adc216151f40887c5df75fb7e14",
+        "d91ed3d9340abf7db7a790330f6851052004b9dbb684d3d058fe827229c6bf58",
     ),
 }
 

@@ -313,7 +313,6 @@ def _prefill(ar, model, embeds, prompt_kwargs, chunks=None):
         embeds,
         prompt_kwargs,
         prefill_step_size=STEP,
-        greedy_sampling=True,
     )
     while batch.needs_processing():
         taken = batch.prompt_step()

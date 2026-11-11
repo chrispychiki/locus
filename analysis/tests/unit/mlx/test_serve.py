@@ -629,6 +629,42 @@ class TestServedOnly:
         )
         assert response_of(sent) == (200, {"ok": True})
 
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("resumable", True),
+            ("continuation", {"id": "c", "token": "t"}),
+            ("continue_final_message", True),
+            ("transient_context", "the clock reads noon"),
+            ("tool_result_context", {"entries": [], "max_bytes": 1024}),
+        ],
+    )
+    def test_a_request_setting_a_refused_field_is_refused(self, field, value):
+        reached = []
+
+        async def inner(scope, receive, send):
+            reached.append(True)
+
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(inner, served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": chat_body(**{field: value})}],
+        )
+        status, payload = response_of(sent)
+        assert reached == []
+        assert status == 400
+        assert SERVED in payload["detail"] and field in payload["detail"]
+
+    @pytest.mark.parametrize("field", sorted(serve.REFUSED_FIELDS))
+    @pytest.mark.parametrize("unset", [None, False, ""])
+    def test_a_refused_field_left_unset_is_served(self, field, unset):
+        sent = run_asgi(
+            serve.ServedOnlyMiddleware(json_response(200, {"ok": True}), served=SERVED),
+            http_scope(),
+            [{"type": "http.request", "body": chat_body(**{field: unset})}],
+        )
+        assert response_of(sent) == (200, {"ok": True})
+
     def test_a_body_that_is_not_a_json_object_is_upstreams_to_answer(self):
         heard = []
 
@@ -1300,7 +1336,7 @@ class TestGpuTracking:
 
 class TestUpstreamSamplerTripwire:
     def test_batched_sampler_draws_from_exactly_the_claimed_fields(self):
-        """The cards may claim top_k and not min_p because upstream's batched sampler is built from temperature/top_p/top_k/seed alone. When this fails, re-verify SUPPORTED_SAMPLING (cards.py) against the new sampler."""
+        """The cards may claim top_k and not min_p because upstream's batched sampler is built from temperature/top_p/top_k/seed, beside three filters of its own that no card claims. When this fails, re-verify SUPPORTED_SAMPLING (cards.py) against the new sampler."""
         import inspect
 
         from mlx_vlm.server.generation import _PositionedTargetSampler
@@ -1308,7 +1344,15 @@ class TestUpstreamSamplerTripwire:
         params = set(
             inspect.signature(_PositionedTargetSampler.__init__).parameters
         ) - {"self"}
-        assert params == {"temperature", "top_p", "top_k", "seed"}
+        assert params == {
+            "temperature",
+            "top_p",
+            "top_k",
+            "seed",
+            "top_n_sigma",
+            "p_less",
+            "typical_p",
+        }
 
 
 class TestThinkingBudgetDecodePipeline:

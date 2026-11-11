@@ -949,7 +949,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.36.0" },
     { name = "locus-evidence", editable = "evidence" },
     { name = "mlx", marker = "sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.32.4" },
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.7.10" },
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.7.12" },
     { name = "openai", specifier = ">=2.41.0" },
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "pillow-heif", marker = "sys_platform == 'darwin' and extra == 'mlx'" },
@@ -1129,7 +1129,7 @@ wheels = [
 
 [[package]]
 name = "mlx-vlm"
-version = "0.7.10"
+version = "0.7.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
@@ -1152,9 +1152,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/26/b5/86eb4a7785974ebbbb3655b1a82c0c342bd9b8e08f7ee6ccafe6f5de2fae/mlx_vlm-0.7.10.tar.gz", hash = "sha256:89adc43235194e797b6ac6795fd275e8957a5d14a1e2760ba49e3a7fedf79f96", size = 2699280, upload-time = "2026-10-21T17:47:10.614Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/d8/42c40e2d3ca9fafef53effc3f0ea303b5ba82f386a2d86f0e93757572f74/mlx_vlm-0.7.12.tar.gz", hash = "sha256:379eec215d144ae1b6bbe60602e10409ed74f50d88e26d93ba82dcb97b38b360", size = 2910902, upload-time = "2026-11-04T17:04:12.784Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/33/81/e6d41cf23f692472dea89af0d1797f8a9e764c0979d9a9fb562224ee8209/mlx_vlm-0.7.10-py3-none-any.whl", hash = "sha256:f112ddaaf1bf0dd1efa702b5675a27df3345614e69e3996d3fbd09d838b8333d", size = 3388076, upload-time = "2026-10-21T17:47:08.582Z" },
+    { url = "https://files.pythonhosted.org/packages/23/02/edff5808937aa072ee6ce4e4a8745d36ff1882578f26f2f1d2096029e535/mlx_vlm-0.7.12-py3-none-any.whl", hash = "sha256:0412a883ed5f0ee2fe65e6c050819ae586ac76f1811f94a373b6293e92568e37", size = 3640799, upload-time = "2026-11-04T17:04:10.366Z" },
 ]
 
 [[package]]

@@ -6,19 +6,19 @@ Every upstream source the processor relies on is pinned; on drift the server ref
 """
 
 EXPECTED_SHA256 = {
-    "sample_utils.make_logits_processors": "d401dbf51e43dc56077f85124a22405ce9b34d252be14ed7e6ed1aa97d50c8bc",
-    "sample_utils.make_presence_penalty": "a10678c8ab91df6a01abb9e5218f561ad81e17da9ebcea9a7d25f8c00955bab5",
+    "sample_utils.make_logits_processors": "c816942e4b33b27b3191b2ce3d52d237b965f2fc7933b3dad36bcf58af249bcb",
+    "sample_utils.make_presence_penalty": "b8d09ef9aab984beaac7fa3448f80f115118f011914602444c3c3b2afb3d6371",
     "ResponseGenerator._make_logits_processors": "dbcfb849a7cd2af08d5c0cb5dd7bd12ed5ebe7646c32cc99bbb3ef2e3b697a97",
-    "ResponseGenerator._run_impl": "024ace0b29d1ad6683ed5d573ce6835a1b1267421d41cfbe60197ebb4958395e",
-    "PromptProcessingBatch.__init__": "463151a660348eb1b33871c7e8ec88c14327655067f6ef34fb0bd1b99ab278f1",
-    "PromptProcessingBatch.generate": "14bccb2baaeb063dc892486b06870f9b638d147fe8e2f2a833a9dcd150b3c06c",
-    "GenerationBatch._step": "e5afa79043c9aa1a7fdb3321aa8b15f09a97dcf4e5c642c4aaf726ed5a4603e3",
+    "ResponseGenerator._start_batch_request": "af6ab4d3a1d425e23e8e0adf84998904587ab27859ef7951a314194f159503b7",
+    "PromptProcessingBatch.__init__": "7ff5403e3d4852a0ef0021f0ea6050755bf73e7d4143478e6c7c8f1e885526fa",
+    "PromptProcessingBatch.generate": "b83bcedbc806108884b94af4056f190a9984791cf75d713e8eb8778b88c07760",
+    "GenerationBatch._step": "51cc7f9893b16eccfcff77c223cc6fe2f5c9aa69b46f75f221ff34390ac89115",
     "GenerationBatch.__init__": "5006caa3328ea8b7c385e22433f79fa4246687b199917cb7b666d39128d4386a",
     "GenerationBatch.empty": "9b3e514b61ca851ab8b34fe75d764461f1d73095d66b92501fc396bc56ffeeac",
-    "GenerationBatch.extend": "6b854e036ff16901a1c99ae58c52cf88452c18f235e1b6d6d5a78cf96b46c213",
-    "GenerationBatch.filter": "3be0b906ce17899d31526b33a043e81a7dc8cc47c7c23b76dc558aae86050788",
+    "GenerationBatch.extend": "7b02a4a8095b3153e78d096be82647c59c6c6665652476bdd8d43a632ddb4a67",
+    "GenerationBatch.filter": "fa446fc00888a747bb5eff74ca474a1347a0edf139b0203d069dc07677cf079f",
     "GenerationBatch._fused_greedy_step": "87a0e4039a33b88b161e75cd19c5b52e59d0a265387525975056c3eac8541fc8",
-    "BatchGenerator.insert": "39da2c6cb7e3519d7887d5267bf42fc6be2606215804da38e02ffb1dc278d090",
+    "BatchGenerator.insert": "09ee02ba820ad0958a9e42c77ba4687b297eec4a7a9887a8d68315c3dcc99ce4",
     "qwen3_5 LanguageModel.supports_fused_greedy_logits_processors": "df63f6a674b66568d2952313dea129cdc6b71ea6f9642fe64e93bf73ec7dc0f7",
 }
 
@@ -91,7 +91,10 @@ def install_presence_penalty() -> None:
             "ResponseGenerator._make_logits_processors",
             generation.ResponseGenerator._make_logits_processors,
         ),
-        ("ResponseGenerator._run_impl", generation.ResponseGenerator._run_impl),
+        (
+            "ResponseGenerator._start_batch_request",
+            generation.ResponseGenerator._start_batch_request,
+        ),
         ("PromptProcessingBatch.__init__", ar.PromptProcessingBatch.__init__),
         ("PromptProcessingBatch.generate", ar.PromptProcessingBatch.generate),
         ("GenerationBatch._step", ar.GenerationBatch._step),

@@ -8,8 +8,8 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
 - min_p is accepted per-request but never reaches the batched sampler; the cards therefore do not claim it.
 - the presence penalty is taken off every token among the last presence_context_size of the whole sequence, the prompt included, while the cards' value is set for a penalty over the generated tokens alone.
   Patched here: presence_penalty.install_presence_penalty penalizes every generated token and none of the prompt.
-- the chat template reads a tool message's images, an assistant answer's reasoning and the request's template options, but upstream drops the first two before the template and gives a request no way to pass the third (chat_template_kwargs).
-  Patched here: chat_turns.install_chat_turns carries all three to the template.
+- the chat template reads a tool message's images and the request's template options, but upstream drops the first before the template and gives a request no way to pass the second (chat_template_kwargs).
+  Patched here: chat_turns.install_chat_turns carries both to the template.
 - a request's images encode in one batch, so the vision-encode transient scales with the request's total pixels and no token-denominated guard bounds it — a large enough image batch aborts the server even when it fits the token context (MAX_KV_SIZE counts expanded vision tokens, so its guard doesn't close this).
   Patched here: vision_chunking.install_vision_encode_chunking encodes Qwen's in chunks of at most the processor's pixel limit (count.pixel_limit), an image a request's own min_pixels sizes past it alone, output-identical on the pinned upstream.
 - on GPUs without neural accelerators, mlx reads a multi-token chunk of a head-dim-256 model by materializing its whole score table, so prefill memory grows with the prompt (16 GiB per 2,048-token chunk at 256k keys).
@@ -22,7 +22,9 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: chat_turns.install_chat_turns has the handler never compact, and refuses a request that asks it to.
 - Gemma 4: an image prompt prefills unchunked, with prompt × prompt masks and the image overlay on every layer and past the sliding window; a request's images encode as one graph; every image is resized to fill the processor config's 280-token budget; the checkpoint's chat template is stale, and Google's canonical one renders a tool reply's text and then all of its images; and the reasoning split tries the single-token thinking markers the thinking budget needs ahead of its own pair for the whole channel header, so every returned thought begins with the header's `thought`.
   Patched here: gemma4.py, whose docstring says what each patch does.
-- thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
+- a request can opt into a resumable stream (`resumable`, `continuation`, `continue_final_message`), whose generation answers a session object instead of the request's own queue and can stay suspended in the GPU loop, its cache resident, after the response ends; and into messages the handler adds around the conversation (`transient_context`, `tool_result_context`), which the count (count.py) does not render.
+  Refused here: ServedOnlyMiddleware answers a request that sets any of the five with a 400.
+- with a draft model loaded (speculative decoding), a request's logits processors reach only its first generated token, so the presence penalty is dropped without an error, and structured output is refused. The server configures no draft model.
 
 Usage: locus-mlx-serve <card name>   (an openai-compatible card in config/cards/)
 """
@@ -126,6 +128,24 @@ def sole_bind() -> tuple[str, int]:
 GENERATING_ROUTES = frozenset({"/v1/chat/completions", "/chat/completions"})
 MODEL_LIST_ROUTES = frozenset({"/v1/models", "/models"})
 SERVED_ROUTES = GENERATING_ROUTES | MODEL_LIST_ROUTES | {"/health"}
+
+# The chat-request fields that opt into upstream behavior this server refuses, each with why.
+# A false, empty or null value changes nothing upstream, so the refusal passes it.
+_RESUMABLE = (
+    "a resumable stream's generation answers a session instead of the request and can stay "
+    "suspended in the GPU loop after its response ends, where admission cannot see it"
+)
+_ADDED_CONTEXT = (
+    "it adds a message to the conversation that the price of the request never counted; "
+    "send the conversation as it is to be rendered"
+)
+REFUSED_FIELDS = {
+    "resumable": _RESUMABLE,
+    "continuation": _RESUMABLE,
+    "continue_final_message": _RESUMABLE,
+    "transient_context": _ADDED_CONTEXT,
+    "tool_result_context": _ADDED_CONTEXT,
+}
 
 logger = logging.getLogger("locus.analysis.mlx.serve")
 
@@ -270,7 +290,7 @@ async def _send_json(send, status: int, payload, headers=()) -> None:
 class ServedOnlyMiddleware:
     """The server answers only for the model it booted, and only on the routes a client of that model uses (SERVED_ROUTES).
 
-    Upstream is a multi-model server. A chat request naming another model makes it unload the resident weights and load that one in their place — fetching it from the Hub when it is not on disk — and one carrying an adapter path loads the adapter onto them, so what answers is no longer what the card prices and guards; the routes for other model kinds (embeddings, reranking, audio, image) load theirs beside the resident weights. Its other routes — other protocols, settings, cache and offload control, unload — have no caller here. So every route outside SERVED_ROUTES is refused, websockets included, and a chat request naming another model or carrying an adapter path is refused before it waits in line for admission; each refusal names what is served. The model list lists the served model alone, since upstream's also lists every model it finds on disk. The allowlist is the whole rule, so a route a later upstream adds is refused with nothing to update.
+    Upstream is a multi-model server. A chat request naming another model makes it unload the resident weights and load that one in their place — fetching it from the Hub when it is not on disk — and one carrying an adapter path loads the adapter onto them, so what answers is no longer what the card prices and guards; the routes for other model kinds (embeddings, reranking, audio, image) load theirs beside the resident weights. Its other routes — other protocols, settings, cache and offload control, unload — have no caller here. A chat request can also set fields that opt into upstream behavior admission and the count do not cover (REFUSED_FIELDS, each with why). So every route outside SERVED_ROUTES is refused, websockets included, and a chat request naming another model, carrying an adapter path or setting a refused field is refused before it waits in line for admission; each refusal names what is served. The model list lists the served model alone, since upstream's also lists every model it finds on disk. The allowlist is the whole rule, so a route a later upstream adds is refused with nothing to update.
 
     A chat request's body is read whole to check it, then handed on as one message. A body that is not a JSON object passes through to upstream, whose own validation answers it."""
 
@@ -348,6 +368,15 @@ class ServedOnlyMiddleware:
                         "detail": f"{self._what_is_served()}, with no adapter; the request carries adapter_path {adapter!r}"
                     },
                 )
+            for field, why in REFUSED_FIELDS.items():
+                if request.get(field):
+                    return await _send_json(
+                        send,
+                        400,
+                        {
+                            "detail": f"{self._what_is_served()}; the request sets {field}, which is refused: {why}"
+                        },
+                    )
         del request
         delivered = False
 
@@ -638,7 +667,7 @@ def install_embed_step() -> None:
 
     _gpu_embed is the GPU loop's step between admitting a request and prefilling it: it builds the prompt's embeddings, encoding the request's images on the way. Upstream's prefill time starts after it and nothing reports how long it took. The patch times the whole step; TelemetryMiddleware writes the seconds and the image count into the request's serve-log line, and the stream's closing usage chunk carries the time as `embed_ms` in its `timings`, beside upstream's `prompt_ms` and `predicted_ms`. The step's time includes the image encode wherever the encode is evaluated inside it: the chunking patches evaluate each chunk there when the images encode in more than one, and upstream evaluates the image features there to store them whenever the vision cache is on, as SERVER_ENV keeps it. The cache keys a request's images as one set, so the step encodes nothing only when the cache holds that whole set.
 
-    Upstream's GPU loop binds each admitted request's preprocessed inputs — pixel_values among them, an mlx array of every image's patches — to loop locals before encoding them in _gpu_embed, and those locals outlive the loop body: the arrays stay referenced through the request's whole prefill and decode, and past it, until the next request rebinds the names. Nothing reads them after _gpu_embed (its output carries the encoded embeddings, and the vision cache keeps its own encoded copy), so dropping them from the inputs once it returns frees them at the encode.
+    Upstream's GPU loop keeps the request it last admitted bound to a loop variable, and the request holds its preprocessed inputs — pixel_values among them, an mlx array of every image's patches — which _gpu_embed encodes: the arrays stay referenced through the request's whole prefill and decode, and past it, until the next request rebinds the name. Nothing reads them after _gpu_embed (its output carries the encoded embeddings, and the vision cache keeps its own encoded copy), so dropping them from the inputs once it returns frees them at the encode.
 
     It is keyed to the exact source of _gpu_embed, the step whose contract the timing and the release rest on, and of _chat_usage_chunk, which builds the chunk that carries the timings (patching.py owns the policy)."""
     from mlx_vlm.server import generation, openai, schemas
@@ -700,30 +729,47 @@ def install_embed_step() -> None:
 
 
 EXPECTED_GPU_LIFECYCLE_SHA256 = {
-    "QueuedGenerationRequest": "690821fb0c0336df699a52c3ea9b64efb5deb016bf3dfc91b03c7c32c35a2a26",
+    "QueuedGenerationRequest": "3ce0aecafeecd5a1f46a65b73a4c0863cbf9eabfc463d18ff697d15c0483d7b7",
     "_notify_queues": "6556e1c7ea3bc865a0c5d77a55c4e0f1a315a904c39f3adfb9e1b66afb2cd714",
-    "ResponseGenerator.generate": "3f8cdfc9e6dd715bbcedcb044af5ba84968dbb661923f7febb5a4c1a99b0fab2",
-    "ResponseGenerator._run_impl": "024ace0b29d1ad6683ed5d573ce6835a1b1267421d41cfbe60197ebb4958395e",
-    "ResponseGenerator._step": "d7abfe591a2ab6cdd0fe4b577c29786198e00722f1f7499b53b1af41a1df657a",
-    "ResponseGenerator._apply_cancellations": "7c1d8a8391d8550b961ab912b2753d656f615f3c7dfa21774f4f5a662dedce0f",
+    "ResponseGenerator.generate": "662a3a01e3df3508c9376ae7bb0b3c6decd4c5da104fdb29337018a614245caa",
+    "ResponseGenerator._run_impl": "a4b78e1ccb4232c138d72e8fc368296f4ac0affa40826fb24a50ef01f2af7cbd",
+    "ResponseGenerator._start_batch_request": "af6ab4d3a1d425e23e8e0adf84998904587ab27859ef7951a314194f159503b7",
+    "ResponseGenerator._schedule_continuations": "e6cf672ef02676585545573f5bcc5a52eca1de89d4eb1f1303bf27cb36d94396",
+    "ResponseGenerator._step_group": "8a0fdf807b99c726cd530c0e21312f51348a9adf84c4530433bea10beac92f8d",
+    "ResponseGenerator._step": "d373d6949ed21b8e2020445146a0cc7077608a97512ef5af68b26a6da54d3428",
+    "ResponseGenerator._emit_responses": "ed6298886caaa7ed527281b7c53bb9f569e1678ab93649062c48bbb0a5a6d7d0",
+    "ResponseGenerator._flush": "899d4235cca53dccb26f286447706e30b3d5b963878d0bf6ce27e7af8380121a",
+    "ContinuationMiddleware.__call__": "210d98695df2519fa6228d96d68e15f652378fcf4ca4e20aa1169d18910f39ac",
+    "continuation.start_generation": "9e00b646f66086f32b4b6d3b7e1d648705fc199803dec7f3f163e12dc1cdde8b",
 }
 
 
 def install_gpu_tracking(admission: Admission) -> None:
     """Count the requests upstream's GPU loop holds, so admission frees its slot only once the loop has dropped them.
 
-    ResponseGenerator.generate runs on a worker thread the caller's handler awaits: it preprocesses the request (tokenizing, loading and resizing images — seconds for a large image set), builds one QueuedGenerationRequest, and hands it to the GPU loop's queue; the loop answers on the request's own rqueue and ends every request it took with a terminal message — None when it finishes or is cancelled (sent after the request is out of the batch), an exception when inserting or stepping it fails. A caller that disconnects while generate is still preprocessing ends its response at once, but the worker thread runs on and queues the request anyway. So a request is counted from the moment generate starts until the first terminal message put on its rqueue — or until generate raises before building one, which queues nothing. Every path to those messages lives in the pinned functions, so the count is keyed to their exact source and the server refuses to boot on drift (patching.py owns the policy)."""
-    from mlx_vlm.server import generation
+    ResponseGenerator.generate runs on a worker thread the caller's handler awaits: it preprocesses the request (tokenizing, loading and resizing images — seconds for a large image set), builds one QueuedGenerationRequest, and hands it to the GPU loop's queue; the loop answers a request that carries no session on the request's own rqueue and ends every such request it took with a terminal message — None when it finishes or is cancelled (sent after the request is out of its batch), an exception when starting or stepping it fails. A caller that disconnects while generate is still preprocessing ends its response at once, but the worker thread runs on and queues the request anyway. So a request is counted from the moment generate starts until the first terminal message put on its rqueue — or until generate raises before building one, which queues nothing. A request with a session is answered on the session instead, and the loop can suspend it with no terminal message at all; only a resumable stream carries one — upstream's continuation middleware decides which request fields make a stream resumable, and its start_generation gives such a stream its session — and ServedOnlyMiddleware refuses those fields (REFUSED_FIELDS). Every path to those messages and to a session lives in the pinned functions, so the count is keyed to their exact source and the server refuses to boot on drift (patching.py owns the policy)."""
+    from mlx_vlm.server import continuation, generation
 
     from .patching import expect_source
 
     pinned = {
         "QueuedGenerationRequest": generation.QueuedGenerationRequest,
         "_notify_queues": generation._notify_queues,
-        "ResponseGenerator.generate": generation.ResponseGenerator.generate,
-        "ResponseGenerator._run_impl": generation.ResponseGenerator._run_impl,
-        "ResponseGenerator._step": generation.ResponseGenerator._step,
-        "ResponseGenerator._apply_cancellations": generation.ResponseGenerator._apply_cancellations,
+        "ContinuationMiddleware.__call__": continuation.ContinuationMiddleware.__call__,
+        "continuation.start_generation": continuation.start_generation,
+        **{
+            f"ResponseGenerator.{name}": getattr(generation.ResponseGenerator, name)
+            for name in (
+                "generate",
+                "_run_impl",
+                "_start_batch_request",
+                "_schedule_continuations",
+                "_step_group",
+                "_step",
+                "_emit_responses",
+                "_flush",
+            )
+        },
     }
     for name, fn in pinned.items():
         expect_source(
@@ -731,10 +777,12 @@ def install_gpu_tracking(admission: Admission) -> None:
             name,
             fn,
             EXPECTED_GPU_LIFECYCLE_SHA256[name],
-            "The count rests on every request the GPU loop takes ending with exactly one "
-            "terminal message on its rqueue (None, or an exception) sent once it is out of "
-            "the batch — re-verify every path to those messages against the installed "
-            "version, then re-pin.",
+            "The count rests on every request without a session that the GPU loop takes "
+            "ending with a terminal message on its rqueue (None once it is out of its batch, "
+            "or an exception), and on a request carrying a session only when it sets "
+            "a field ServedOnlyMiddleware refuses (serve.REFUSED_FIELDS) — re-verify every "
+            "path to those messages and to a session against the installed version, then "
+            "re-pin.",
         )
 
     import threading
@@ -899,7 +947,7 @@ def main() -> None:
 
     install_chat_turns()
     logger.info(
-        "chat turns installed: no conversation is compacted, and a tool message's images, an assistant answer's reasoning and a request's chat_template_kwargs reach the chat template"
+        "chat turns installed: no conversation is compacted, and a tool message's images and a request's chat_template_kwargs reach the chat template"
     )
 
     # Last: Gemma 4's wraps PromptProcessingBatch.__init__, which the presence penalty verifies.

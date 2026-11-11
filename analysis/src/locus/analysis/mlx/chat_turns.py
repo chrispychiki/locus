@@ -1,11 +1,12 @@
-"""Every turn of a conversation reaches the model's chat template as it was sent: no turn is compacted away, a tool's reply keeps its images, an assistant answer keeps its reasoning, and a request's chat_template_kwargs reach the template.
+"""Every turn of a conversation reaches the model's chat template as it was sent: no turn is compacted away, a tool's reply keeps its images, and a request's chat_template_kwargs reach the template.
 
 Unless a request sends `context_management: []`, upstream's chat handler compacts a conversation: it clamps max_tokens to the context left and, past the context limit, swaps the conversation's head, the evidence an answer cites, for a model-written summary. Patched: the handler never compacts, and a request that asks it to is refused with a 400 (compacts).
 
-The chat template each local model is served with renders a tool message's images in place (Qwen's own; Gemma 4's as gemma4.py changes it), and the reasoning of the assistant turns since the latest user message. Under the preserve_thinking option, which both cards set, Qwen's also renders every earlier turn's reasoning, as its model card recommends for agent use, and Gemma 4's every earlier tool-call turn's, which its model card says is kept. Upstream drops each on the way to the template:
+The chat template each local model is served with renders a tool message's images in place (Qwen's own; Gemma 4's as gemma4.py changes it), and reads options a request sets: under preserve_thinking, which both cards set, Qwen's renders every earlier turn's reasoning, as its model card recommends for agent use, and Gemma 4's every earlier tool-call turn's, which its model card says is kept. Through upstream alone, neither reaches the template:
 - a tool message's images: the chat handler and the request normalizer take images from user messages only. Patched: they take a tool message's images the same way.
-- the reasoning of an assistant turn without tool calls: apply_chat_template rebuilds such a message from its content alone, dropping reasoning_content. Patched: a message carrying reasoning_content passes intact.
 - chat_template_kwargs, where vLLM and SGLang take template options: upstream ignores it. Patched: the options reach get_chat_template whole. An option is refused with a 400 unless the template reads it and nothing else sets it: a field of the request belongs in the request, and a name the server already passes cannot be overridden.
+
+An assistant turn's reasoning reaches the template through upstream alone: apply_chat_template copies reasoning_content onto the message it rebuilds, which is why it is pinned.
 
 Each patch rewrites the named upstream function's code in place, so every caller runs the rewritten code, the count (count.py) included. Each is pinned to the source it rewrites, as are the unrewritten functions it depends on (patching.py).
 """
@@ -24,9 +25,9 @@ CARRIER = "chat_template_kwargs"
 RENDER_SETS = ("messages",)
 
 EXPECTED_SHA256 = {
-    "server/openai.py chat_completions_endpoint": "74c05a1d1cf9b115f6ae23a997feb3202c2853ee972620eb58c32424a7e7dc03",
+    "server/openai.py chat_completions_endpoint": "f94a064abb6e43d73f57021068b9d6ce413646f716a89f57a99622be4e7debc8",
     "server/request_normalization.py _chat_message_to_prompt": "f43965254200dda17f3f6d34079efe846ebee3c836d76ac7d1e4d639862cf207",
-    "prompt_utils.py apply_chat_template": "8cae33ccda4a66f50c47a5af4db8c8bea60147023eaefe6bb0022a44acdc4012",
+    "prompt_utils.py apply_chat_template": "376ce52e1b34b3aee9242e97e21b46d1f3818532c6ff27a4c31d4447b0ffcf8d",
     "prompt_utils.py get_chat_template": "6cbda46759fa8de2c9e580b26210642aa0b93902be2fd63eaa4c14d612809d45",
     "prompt_utils.py normalize_image_content": "b92c704d42e5953c346a2d40b96a50fdde6c8056ea455ff4887ef19d6effc8cf",
     "prompt_utils.py _normalize_tool_message": "cc377cf6dfedc6186daab2f849a0edbe276002aee8917dd819e02bf04d1f6775",
@@ -57,23 +58,14 @@ REWRITES = {
             ),
         ),
         (
-            "        formatted_prompt = apply_chat_template(\n",
-            "        formatted_prompt = refused_as_400(apply_chat_template)(\n",
+            "        formatted_prompt = continuation.render_prompt(\n            apply_chat_template,\n",
+            "        formatted_prompt = continuation.render_prompt(\n            refused_as_400(apply_chat_template),\n",
         ),
     ],
     "server/request_normalization.py _chat_message_to_prompt": [
         (
             'if message["role"] == "user"',
             f'if message["role"] in {IMAGE_ROLES!r}',
-        ),
-    ],
-    "prompt_utils.py apply_chat_template": [
-        (
-            '"tool_calls" in p or "tool_call_id" in p or role == "tool"\n',
-            (
-                '"tool_calls" in p or "tool_call_id" in p or role == "tool"\n'
-                '                    or (role == "assistant" and p.get("reasoning_content") is not None)\n'
-            ),
         ),
     ],
     "prompt_utils.py get_chat_template": [
@@ -140,8 +132,8 @@ OWES = (
     "the handler compacting only inside the block its context_management test gates, "
     "collecting a message's images, building the template's keyword arguments and "
     "rendering with them, the normalizer choosing which roles keep list content, "
-    "apply_chat_template choosing which messages pass to the template intact and counting a tool "
-    "message's image markers, get_chat_template building what the template renders with — "
+    "apply_chat_template carrying an assistant message's reasoning_content to the template and "
+    "counting a tool message's image markers, get_chat_template building what the template renders with — "
     "re-verify those, then re-pin (analysis/src/locus/analysis/mlx/chat_turns.py)."
 )
 
