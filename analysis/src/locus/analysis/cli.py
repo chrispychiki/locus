@@ -112,10 +112,10 @@ def _result(payload: dict) -> None:
     print(json.dumps(payload))
 
 
-def _local_server(model: str, prompt_tokens: int, analyses_dir: Path) -> dict | None:
-    """On a local card the price is also a wait: the server's admission state now and, once calls have completed here, the measured pace of this model on this machine. A paid card has neither."""
-    from .model.cards import OPENAI_COMPATIBLE, conversation, declared_card, model_id
-    from .model.openai_compat import measured_serving, server_admission
+def _local_server(model: str) -> dict | None:
+    """A local card's price report also says how many requests its server has running and waiting, or that none answers. A paid card has no server."""
+    from .model.cards import OPENAI_COMPATIBLE, conversation, declared_card
+    from .model.openai_compat import server_admission
 
     if conversation(model) != OPENAI_COMPATIBLE:
         return None
@@ -126,7 +126,6 @@ def _local_server(model: str, prompt_tokens: int, analyses_dir: Path) -> dict | 
             "the local backend dials; declare it in the card's file under config/cards/"
         )
     admission = server_admission(base_url)
-    served = measured_serving(analyses_dir, model_id(model))
     if admission is None:
         line = f"; no server answers at {base_url} — a run would wait for one"
     else:
@@ -134,28 +133,7 @@ def _local_server(model: str, prompt_tokens: int, analyses_dir: Path) -> dict | 
             f"; the server has {admission['running']} running, "
             f"{admission['waiting']} waiting, served one at a time"
         )
-    if served:
-        prefill_min = prompt_tokens / served["prompt_tokens_per_s"] / 60
-        line += (
-            f"; the last {served['calls']} calls here prefilled at "
-            f"{served['prompt_tokens_per_s']} tokens/s (this payload: about "
-            f"{prefill_min:.1f} min before the first token) and generated "
-            f"{served['generated_tokens_median']} tokens at "
-            f"{served['generated_tokens_per_s']} tokens/s — about "
-            f"{served['served_s_median'] / 60:.0f} min served per call, plus the wait "
-            "for admission"
-        )
-    else:
-        line += "; no completed call here yet to measure this model's pace by"
-    return {
-        "base_url": base_url,
-        "admission": admission,
-        "measured": served,
-        "prefill_estimate_s": (
-            round(prompt_tokens / served["prompt_tokens_per_s"]) if served else None
-        ),
-        "line": line,
-    }
+    return {"base_url": base_url, "admission": admission, "line": line}
 
 
 def _main_opens(args) -> bool:
@@ -774,9 +752,7 @@ def _analyze(args) -> None:
             if "pricing" in price
             else ""
         )
-        server = _local_server(
-            model, turn1["total_tokens"], _derived_root(db) / "analyses"
-        )
+        server = _local_server(model)
         _result(
             {
                 "current_timestamp": utc_stamp(),

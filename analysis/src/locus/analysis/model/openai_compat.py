@@ -9,7 +9,7 @@ Client and server share a filesystem: images travel as plain absolute paths and 
 - every request is counted before send and refused loud when the count plus max_tokens exceeds the card's context_tokens. The count is the server's own, run here by the server's own code over the request as it will be sent (mlx/count.py), so the refusal, context_remaining and pricing (budget.py) all read the number the server will report. The server enforces the same bound when MAX_KV_SIZE is set; the client refusal is the informative half, made before a doomed request waits on admission;
 - the renderer draws each screenshot at the size screenshot_size gives its viewport from the card's `image_tokens` value for its kind, activity or pulled, and that file is what is sent;
 - every request streams (`stream_options.include_usage`) and is reassembled here into the same persisted record a non-streamed call would leave: content and reasoning deltas concatenated, tool-call deltas merged by index, usage from the terminal usage chunk. Streaming is what makes a long generation legible while it runs — the deltas are the run's progress, and the server serves one request at a time from admission to the end of its response;
-- that terminal usage chunk carries a `timings` sibling to `usage` (prompt/generation token rates and ms, cache hits, peak model memory) that the openai SDK does not model; it survives as `model_extra` and is folded into the persisted usage record — the local analogue of Gemini's usage breakdown. The response's `x-locus-request` header is folded in too (`server_request`): it is the id keying the server's per-request memory telemetry, so the persisted record names its own rows in the server's memory log.
+- that terminal usage chunk carries a `timings` sibling to `usage` (prompt/generation token rates and ms, the embed step's ms, cache hits, peak model memory) that the openai SDK does not model; it survives as `model_extra` and is folded into the persisted usage record — the local analogue of Gemini's usage breakdown. The response's `x-locus-request` header is folded in too (`server_request`): it is the id keying the server's per-request memory telemetry, so the persisted record names its own rows in the server's memory log.
 
 Config is stated, never defaulted: the conversation is constructed from a model card (cards.py) and sends the model, the thinking budget, every sampling value and the card's chat template options explicitly on every request — thinking is the backend's one mode, and enable_thinking rides the wire as an explicit true rather than falling to an upstream default. The persisted payload is therefore the complete record of the generation intent — nothing the server applies is absent from it. Omitted fields would fall to upstream's own defaults — the checkpoint's generation config, then upstream's schema.
 
@@ -201,13 +201,24 @@ class OpenAICompatConversation(Conversation):
     def wire_request(
         self, tools: list | None = None, response_schema: Any = None
     ) -> dict:
-        """The chat-completions request this conversation sends as it stands — the one body the wire, the pre-send count and pricing all read."""
+        """The chat-completions request this conversation would send as it stands, with these tools and this schema — the body the pre-send count and pricing read."""
+        return self._request(*self._declarations(tools or [], response_schema))
+
+    def _request(self, sent_tools: list, sent_schema: dict | None) -> dict:
         params = self._request_params()
-        if tools:
-            params["tools"] = [{"type": "function", "function": t} for t in tools]
-        if response_schema is not None:
-            params["response_format"] = _json_schema_format(response_schema)
+        if sent_tools:
+            params["tools"] = sent_tools
+        if sent_schema is not None:
+            params["response_format"] = sent_schema
         return params
+
+    def _declarations(
+        self, tools: list, response_schema: Any
+    ) -> tuple[list, dict | None]:
+        return (
+            [{"type": "function", "function": t} for t in tools],
+            None if response_schema is None else _json_schema_format(response_schema),
+        )
 
     def sent_images(self) -> list[str]:
         """The file each image part sends, in order."""
@@ -247,7 +258,7 @@ class OpenAICompatConversation(Conversation):
             raise ValueError("conversation has no user content")
         self._last_shape = (tools, response_schema)
         self._refuse_oversized()
-        params = self.wire_request(tools, response_schema)
+        params = self._request(*self._declared)
 
         if self.dry_run:
             raise DryRun(
@@ -348,6 +359,7 @@ class OpenAICompatConversation(Conversation):
                 id=call["id"],
                 name=call["function"]["name"],
                 arguments=parsed_arguments(call["function"]["arguments"]),
+                wire_arguments=call["function"]["arguments"],
             )
             for call in wire_calls
         ]
@@ -417,49 +429,3 @@ def server_admission(base_url: str) -> dict | None:
             return json.load(response).get("admission")
     except (URLError, OSError, ValueError):
         return None
-
-
-def measured_serving(analyses_dir: Path, model_id: str, last: int = 5) -> dict | None:
-    """How this machine has served this model: the medians over the most recent `last` completed answer-turn calls (`analyses/*/*_meta.json`, whose `usage.timings` is the server's own) of the prefill rate in prompt tokens per second, the generation rate, the tokens an answer generated, and the served time — the server's prompt_ms + predicted_ms, not the client's wall-clock, which is mostly the wait for admission. None until a call has completed here."""
-    import statistics
-
-    calls = []
-    for meta_path in analyses_dir.glob("*/*_meta.json"):
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
-            continue
-        timings = (meta.get("usage") or {}).get("timings")
-        if (
-            not timings
-            or meta.get("error")
-            or (meta.get("config") or {}).get("model") != model_id
-            or not meta.get("started")
-        ):
-            continue
-        calls.append(
-            {
-                "started": meta["started"],
-                "prompt_tokens_per_s": timings["prompt_per_second"],
-                "generated_tokens_per_s": timings["predicted_per_second"],
-                "generated_tokens": timings["predicted_n"],
-                "served_s": (timings["prompt_ms"] + timings["predicted_ms"]) / 1000,
-            }
-        )
-    if not calls:
-        return None
-    recent = sorted(calls, key=lambda c: c["started"])[-last:]
-    return {
-        "calls": len(recent),
-        "prompt_tokens_per_s": round(
-            statistics.median(c["prompt_tokens_per_s"] for c in recent)
-        ),
-        "generated_tokens_per_s": round(
-            statistics.median(c["generated_tokens_per_s"] for c in recent)
-        ),
-        "generated_tokens_median": round(
-            statistics.median(c["generated_tokens"] for c in recent)
-        ),
-        "served_s_median": round(statistics.median(c["served_s"] for c in recent)),
-        "since": recent[0]["started"],
-    }

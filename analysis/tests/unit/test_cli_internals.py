@@ -322,20 +322,18 @@ def test_a_run_told_to_stop_leaves_a_last_word(capsys, tmp_path):
     assert "new run" in said
 
 
-def test_a_local_price_refuses_a_card_without_a_base_url(monkeypatch, tmp_path):
+def test_a_local_price_refuses_a_card_without_a_base_url(monkeypatch):
     """A local card that declares no endpoint has no server to ask; the price says which card and what it lacks instead of dying on a missing key."""
     from locus.analysis.cli import _local_server
 
     cards = {"local": {"conversation": "openai-compatible", "model": "m"}}
     monkeypatch.setattr("locus.analysis.model.cards._cards", lambda: cards)
     with pytest.raises(SystemExit, match="card 'local' declares no base_url"):
-        _local_server("local", 1000, tmp_path)
+        _local_server("local")
 
 
-def test_a_local_price_states_the_servers_admission_and_its_measured_pace(
-    monkeypatch, tmp_path
-):
-    """On a local card the price is also a wait: the report says the server's admission state and, from completed calls here, this machine's prefill rate as this payload's minutes before a first token, and what a call took. Without a server it says so; before any call it says there is nothing to measure by; a paid card carries neither."""
+def test_a_local_price_states_the_servers_admission(monkeypatch):
+    """A local card's price report says how many requests its server has running and waiting, or that no server answers; a paid card's says neither."""
     from locus.analysis.cli import _local_server
     from locus.analysis.model import openai_compat
 
@@ -351,39 +349,16 @@ def test_a_local_price_states_the_servers_admission_and_its_measured_pace(
     monkeypatch.setattr(
         openai_compat, "server_admission", lambda base_url: {"running": 1, "waiting": 3}
     )
-    measured = {
-        "calls": 4,
-        "prompt_tokens_per_s": 400,
-        "generated_tokens_per_s": 30,
-        "generated_tokens_median": 6000,
-        "served_s_median": 320,
-        "since": "2026-09-04T10:00:00Z",
-    }
-    monkeypatch.setattr(
-        openai_compat,
-        "measured_serving",
-        lambda analyses_dir, model_id, last=5: measured,
-    )
 
-    assert _local_server("paid", 48000, tmp_path) is None
+    assert _local_server("paid") is None
 
-    server = _local_server("local", 48000, tmp_path)
+    server = _local_server("local")
     assert server["admission"] == {"running": 1, "waiting": 3}
-    assert server["prefill_estimate_s"] == 120
     assert server["line"] == (
         "; the server has 1 running, 3 waiting, served one at a time"
-        "; the last 4 calls here prefilled at 400 tokens/s (this payload: about "
-        "2.0 min before the first token) and generated 6000 tokens at 30 tokens/s — "
-        "about 5 min served per call, plus the wait for admission"
     )
 
     monkeypatch.setattr(openai_compat, "server_admission", lambda base_url: None)
-    monkeypatch.setattr(
-        openai_compat, "measured_serving", lambda analyses_dir, model_id, last=5: None
-    )
-    server = _local_server("local", 48000, tmp_path)
-    assert server["prefill_estimate_s"] is None
-    assert server["line"] == (
+    assert _local_server("local")["line"] == (
         "; no server answers at http://h/v1 — a run would wait for one"
-        "; no completed call here yet to measure this model's pace by"
     )

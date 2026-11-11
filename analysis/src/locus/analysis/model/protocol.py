@@ -6,7 +6,7 @@ The backend, by its card, decides how an image is sent; the caller states only w
 
 A caller that wants to know what an image will cost, or how much context is left to spend, asks the backend — image_tokens and context_remaining are the wire's own arithmetic, so an agentic caller serves what fits and refuses the rest against a number that is true at the moment it acts.
 
-The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes its files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt and every part in order, roles delimited, text verbatim, images as inline pointer lines carrying the image's path and the remote reference actually sent, each earlier assistant turn's thoughts as a pointer line linking that call's thoughts file), N_response.txt (the reply), N_thoughts.txt when the backend exposed thoughts, N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response, thoughts and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten.
+The public surface is a template method over backend primitives (_add_user_text / _add_user_image / _get_response), so per-call payload persistence is inherited identically by every backend, and it is never optional: a model-bound conversation states its record home at construction (record_dir — the same motion that places the output it produces), and each get_response() writes its files there, numbered by call — N_input.txt (the entire conversation the model sees on this call, whatever the transport's wire shape: system prompt, each tool's declaration and the response schema as the backend's wire carries them, and every part in order, roles delimited, text verbatim, images as inline pointer lines carrying the image's path and the remote reference actually sent, each earlier assistant turn's thoughts as a pointer line linking that call's thoughts file), N_response.txt (the reply: its text and the tool calls it made), N_thoughts.txt when the backend exposed thoughts, N_meta.json (generation config, usage, the call's UTC start stamp, wall-clock elapsed, error). The input record lands before the request goes to the wire, the response, thoughts and meta on completion — so a collision with an existing record refuses before anything is spent, a call that dies mid-flight still leaves its input behind, and a failed call leaves its input and meta with the error. Existing files are never overwritten.
 
 Pointers are written relative to the payload file that carries them, so they resolve from where they sit and the record directory holding them stays portable.
 
@@ -40,11 +40,12 @@ class UnusableReply(RuntimeError):
 
 @dataclass
 class ToolCall:
-    """A model-emitted tool call, normalized across backends. `arguments` is the parsed argument object — or None where the wire carried argument text that is not a JSON object (the arguments are the model's own writing, and a backend without generation-level grammar can emit anything): the call still exists and must be answered, so the caller answers it with the defect named rather than crashing on it."""
+    """A model-emitted tool call, normalized across backends. `arguments` is the parsed argument object — or None where the wire carried argument text that is not a JSON object (the arguments are the model's own writing, and a backend without generation-level grammar can emit anything): the call still exists and must be answered, so the caller answers it with the defect named rather than crashing on it. `wire_arguments` is that argument text as the wire carried it, on a backend whose wire carries text (the bundled server's is upstream's JSON of the call its parser read out of the model's output); the record shows it."""
 
     id: str
     name: str
     arguments: dict | None
+    wire_arguments: str | None = None
 
 
 @dataclass
@@ -128,6 +129,16 @@ def latest_answer_response(record_dir: Path) -> Path:
     return responses[-1]
 
 
+def _call_line(call: ToolCall) -> str:
+    """A tool call as a record shows it: its arguments as the wire's text where the wire carried text, else as JSON of the object it carried."""
+    shown = (
+        json.dumps(call.arguments)
+        if call.wire_arguments is None
+        else call.wire_arguments
+    )
+    return f"[tool_call id={call.id} {call.name}({shown})]"
+
+
 def tool_parts(content: str | list[tuple]) -> list[tuple]:
     """A tool reply as its parts in order: a string is one text part; a list is checked part by part — ("text", text) or ("image", path)."""
     if isinstance(content, str):
@@ -162,6 +173,7 @@ class Conversation(ABC):
         self._open_calls: set[str] = set()
         self._last_usage_total: int | None = None
         self._record_at_response = 0
+        self._declared: tuple[list, dict | None] = ([], None)
         # Where the call in flight stands, as the backend learns it — read from another thread by
         # a caller's pulse while this one blocks on the wire, so it is only ever replaced whole.
         self.progress: dict = {}
@@ -226,7 +238,10 @@ class Conversation(ABC):
             }
 
         billing = self._billing()
-        stem = self._persist_input(label)
+        # Before any record: a schema or declaration the backend cannot put on its wire
+        # is refused with nothing recorded.
+        self._declared = self._declarations(tools or [], response_schema)
+        stem = self._persist_input(label, *self._declared)
         from locus.evidence.clock import utc_stamp
 
         started_at = utc_stamp()
@@ -429,11 +444,22 @@ class Conversation(ABC):
     def _config_manifest(self) -> dict:
         return {}
 
+    def _declarations(
+        self, tools: list, response_schema: Any
+    ) -> tuple[list, dict | None]:
+        """The tool declarations and the response schema as this backend's wire carries them. get_response builds them once per call into `_declared`, which the backend's request reads and the input record shows."""
+        return (
+            list(tools),
+            None if response_schema is None else json_schema_of(response_schema),
+        )
+
     def _persist_write(self, stem: str, suffix: str, content: str) -> None:
         with open(self._persist_dir / f"{stem}_{suffix}", "x") as f:
             f.write(content if content.endswith("\n") else content + "\n")
 
-    def _persist_input(self, label: str | None) -> str | None:
+    def _persist_input(
+        self, label: str | None, tools: Sequence = (), schema: dict | None = None
+    ) -> str | None:
         if self._persist_dir is None:
             return None
         self._persisted_calls += 1
@@ -454,6 +480,10 @@ class Conversation(ABC):
 
         if self.system_prompt:
             emit("system", self.system_prompt)
+        for tool in tools:
+            emit("tools", json.dumps(tool, indent=2))
+        if schema is not None:
+            emit("response schema", json.dumps(schema, indent=2))
         for entry in self._record:
             if entry[0] == "text":
                 emit("user", entry[1])
@@ -475,10 +505,7 @@ class Conversation(ABC):
             elif entry[0] == "assistant_tool_calls":
                 if entry[3]:
                     emit("assistant thoughts", f"[{entry[3]}]({entry[3]})")
-                calls = "\n".join(
-                    f"[tool_call id={c.id} {c.name}({json.dumps(c.arguments)})]"
-                    for c in entry[1]
-                )
+                calls = "\n".join(_call_line(c) for c in entry[1])
                 emit("assistant", (f"{entry[2]}\n{calls}" if entry[2] else calls))
             else:
                 if entry[2]:
@@ -501,7 +528,16 @@ class Conversation(ABC):
         if stem is None:
             return
         if response is not None:
-            self._persist_write(stem, "response.txt", response.text)
+            self._persist_write(
+                stem,
+                "response.txt",
+                "\n".join(
+                    [
+                        *([response.text] if response.text else []),
+                        *(_call_line(c) for c in response.tool_calls),
+                    ]
+                ),
+            )
             if response.thoughts_text:
                 self._persist_write(stem, "thoughts.txt", response.thoughts_text)
 

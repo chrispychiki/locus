@@ -539,7 +539,7 @@ class GeminiConversation(Conversation):
     ) -> Response:
         self._reply_thinking_level = self.thinking_level
         self._reply_interaction_id = None
-        interaction = self._generate(response_schema, self.thinking_level, tools=tools)
+        interaction = self._generate(self.thinking_level)
 
         # An overrun of max_output_tokens ends the interaction as status
         # 'incomplete' (measured live 2026-07-23: a 200 cap consumed by 192
@@ -562,10 +562,7 @@ class GeminiConversation(Conversation):
             }
             self._reply_thinking_level = self._lowest_thinking_level()
             interaction = self._generate(
-                response_schema,
-                self._reply_thinking_level,
-                include_thoughts=False,
-                tools=tools,
+                self._reply_thinking_level, include_thoughts=False
             )
 
         self._require_usable(interaction, first_attempt)
@@ -586,13 +583,29 @@ class GeminiConversation(Conversation):
             "interaction_id": self._reply_interaction_id,
         }
 
-    def _generate(
-        self,
-        response_schema: Any,
-        thinking_level: str | None,
-        include_thoughts: bool = True,
-        tools: list | None = None,
-    ):
+    def _declarations(
+        self, tools: list, response_schema: Any
+    ) -> tuple[list, dict | None]:
+        return (
+            [
+                {
+                    "type": "function",
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t["parameters"],
+                }
+                for t in tools
+            ],
+            None
+            if response_schema is None
+            else {
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": _add_property_ordering(json_schema_of(response_schema)),
+            },
+        )
+
+    def _generate(self, thinking_level: str | None, include_thoughts: bool = True):
         input_steps = [dict(step) for step in self._pending]
 
         generation_config: dict = {
@@ -618,22 +631,11 @@ class GeminiConversation(Conversation):
             request["system_instruction"] = self.system_prompt
         if self._interaction_id is not None:
             request["previous_interaction_id"] = self._interaction_id
-        if tools:
-            request["tools"] = [
-                {
-                    "type": "function",
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t["parameters"],
-                }
-                for t in tools
-            ]
-        if response_schema is not None:
-            request["response_format"] = {
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": _add_property_ordering(json_schema_of(response_schema)),
-            }
+        sent_tools, sent_schema = self._declared
+        if sent_tools:
+            request["tools"] = sent_tools
+        if sent_schema is not None:
+            request["response_format"] = sent_schema
         if self.dry_run:
             raise DryRun(
                 f"dry run: request to {self.model_id} assembled and persisted, not sent"

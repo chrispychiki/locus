@@ -296,6 +296,67 @@ def test_persisted_calls_capture_the_full_payload_as_sent(tmp_path):
     assert not (payloads / "2_revision_thoughts.txt").exists()
 
 
+def test_the_input_record_shows_the_tools_the_schema_and_calls_as_the_wire_had_them(
+    tmp_path,
+):
+    """The record shows each tool's declaration and the response schema in full, and a tool call, in its own turn's response and in later inputs, with its arguments as the wire's text, even text that is not a JSON object."""
+    from locus.analysis.model.protocol import ToolCall
+
+    payloads = tmp_path / "payloads"
+    tool = {
+        "name": "request_screenshots",
+        "description": "Show the screenshots at these moments.",
+        "parameters": {"type": "object", "properties": {"n": {"type": "integer"}}},
+    }
+    conversation = RecordedConversation(
+        responses=[
+            Response(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_a",
+                        name="request_screenshots",
+                        arguments=None,
+                        wire_arguments='{"n": 1, broken',
+                    ),
+                    ToolCall(
+                        id="call_b", name="request_screenshots", arguments={"n": 2}
+                    ),
+                ],
+            ),
+            Response(text='{"a": 1}'),
+        ],
+        record_dir=payloads,
+    )
+    conversation.add_user_text("events stream")
+    conversation.get_response(label="answer", tools=[tool])
+    conversation.add_tool_result("call_a", "not a JSON object")
+    conversation.add_tool_result("call_b", "served")
+    conversation.get_response(
+        label="answer", tools=[tool], response_schema=dict[str, int]
+    )
+
+    first = (payloads / "1_answer_input.txt").read_text()
+    assert "=== tools ===\n\n" + json.dumps(tool, indent=2) in first
+    assert "=== response schema ===" not in first
+
+    assert (payloads / "1_answer_response.txt").read_text() == (
+        '[tool_call id=call_a request_screenshots({"n": 1, broken)]\n'
+        '[tool_call id=call_b request_screenshots({"n": 2})]\n'
+    ), "a turn that calls a tool shows the calls in its own response"
+
+    second = (payloads / "2_answer_input.txt").read_text()
+    assert '[tool_call id=call_a request_screenshots({"n": 1, broken)]' in second
+    assert '[tool_call id=call_b request_screenshots({"n": 2})]' in second
+    assert (
+        "=== response schema ===\n\n"
+        + json.dumps(
+            {"additionalProperties": {"type": "integer"}, "type": "object"}, indent=2
+        )
+        in second
+    )
+
+
 def test_record_collision_refuses_before_the_wire(tmp_path):
     payloads = tmp_path / "payloads"
     payloads.mkdir()
@@ -1184,6 +1245,46 @@ def test_local_tool_call_turn_replays_its_reasoning(tmp_path):
     )
     assert "look at the form at 2s" not in record
     assert (tmp_path / "r" / "1_thoughts.txt").read_text() == "look at the form at 2s\n"
+
+
+def test_local_record_shows_the_wires_tool_declaration_schema_and_call_text(tmp_path):
+    """The local record shows the tool declaration and the response schema in the shapes the request carries them, and a call's arguments as the wire's text, whatever it parses to."""
+    chunks = _tool_call_chunks()
+    chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] = (
+        '{"screenshots": [oops'
+    )
+    conversation = _streaming_conversation(record_dir=tmp_path / "r", chunks=chunks)
+    conversation.add_user_text("q")
+    tool = {"name": "request_screenshots", "parameters": {"type": "object"}}
+    response = conversation.get_response(tools=[tool], response_schema=dict[str, int])
+    (call,) = response.tool_calls
+    assert call.arguments is None and call.wire_arguments == '{"screenshots": [oops'
+
+    request = conversation.wire_request([tool], dict[str, int])
+    first = (tmp_path / "r" / "1_input.txt").read_text()
+    assert json.dumps(request["tools"][0], indent=2) in first
+    assert json.dumps(request["response_format"], indent=2) in first
+
+    stem = conversation._persist_input("answer")
+    record = (tmp_path / "r" / f"{stem}_input.txt").read_text()
+    assert '[tool_call id=call_a request_screenshots({"screenshots": [oops)]' in record
+
+
+def test_a_schema_no_backend_can_send_is_refused_before_any_record(tmp_path):
+    """A response schema that yields no JSON schema is refused before the call exists: nothing is recorded, no call number is spent, and nothing goes to the wire."""
+    from typing import Any
+
+    conversation = RecordedConversation(
+        responses=[Response(text="answer")], record_dir=tmp_path / "r"
+    )
+    conversation.add_user_text("q")
+    with pytest.raises(ValueError, match="empty JSON schema"):
+        conversation.get_response(label="answer", response_schema=Any)
+    assert not (tmp_path / "r").exists()
+    assert conversation.responses, "the refused call went to the wire"
+
+    conversation.get_response(label="answer")
+    assert (tmp_path / "r" / "1_answer_input.txt").exists()
 
 
 def test_local_tool_reply_carries_its_screenshots_in_order(tmp_path):
@@ -2537,77 +2638,3 @@ def test_sdk_retry_waits_narrate_to_stderr_once(capsys):
         for handler in list(logger.handlers):
             if handler not in before:
                 logger.removeHandler(handler)
-
-
-def test_measured_serving_reads_the_medians_of_this_models_recent_calls(tmp_path):
-    """The pace a local price quotes is measurement: the medians of the last N completed calls' server timings for this model under analyses/ — another model's calls, a failed call, and a call with no timings are not this model's pace — and None until a call has completed here."""
-    import json
-
-    from locus.analysis.model.openai_compat import measured_serving
-
-    def meta(
-        dirname, call, *, model, started, pps, n, served, error=None, timings=True
-    ):
-        d = tmp_path / dirname
-        d.mkdir(exist_ok=True)
-        usage = {"prompt_tokens": 1}
-        if timings:
-            usage["timings"] = {
-                "prompt_per_second": pps,
-                "predicted_per_second": 30,
-                "predicted_n": n,
-                "prompt_ms": served * 1000 / 2,
-                "predicted_ms": served * 1000 / 2,
-            }
-        (d / f"{call}_answer_meta.json").write_text(
-            json.dumps(
-                {
-                    "call": call,
-                    "config": {"model": model},
-                    "usage": usage,
-                    "started": started,
-                    "elapsed_s": served * 6,
-                    "error": error,
-                }
-            )
-        )
-
-    assert measured_serving(tmp_path, "m") is None
-    meta("a", 1, model="m", started="2026-09-04T10:00:00Z", pps=300, n=4000, served=900)
-    meta(
-        "a", 2, model="m", started="2026-09-04T10:20:00Z", pps=400, n=6000, served=1500
-    )
-    meta("b", 1, model="m", started="2026-09-04T09:00:00Z", pps=100, n=100, served=60)
-    meta("c", 1, model="other", started="2026-09-04T11:00:00Z", pps=9, n=9, served=9)
-    meta(
-        "d",
-        1,
-        model="m",
-        started="2026-09-04T11:00:00Z",
-        pps=9,
-        n=9,
-        served=9,
-        error="boom",
-    )
-    meta(
-        "e",
-        1,
-        model="m",
-        started="2026-09-04T11:00:00Z",
-        pps=9,
-        n=9,
-        served=9,
-        timings=False,
-    )
-
-    served = measured_serving(tmp_path, "m", last=2)
-    assert served == {
-        "calls": 2,
-        "prompt_tokens_per_s": 350,
-        "generated_tokens_per_s": 30,
-        "generated_tokens_median": 5000,
-        "served_s_median": 1200,
-        "since": "2026-09-04T10:00:00Z",
-    }, (
-        "the two most recent of this model's completed calls, by their start — served time is the server's, never the client's wall-clock"
-    )

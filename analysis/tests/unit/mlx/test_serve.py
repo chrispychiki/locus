@@ -81,6 +81,32 @@ class TestTelemetryMiddleware:
         assert order == ["inner"]
         assert telemetry.ended
 
+    def test_the_requests_line_carries_its_own_embed_step(self, monkeypatch, caplog):
+        import logging
+
+        from locus.analysis.mlx import serve
+
+        monkeypatch.setattr(serve, "embed_step", {"images": 9, "seconds": 1.0})
+
+        def request(images, seconds):
+            async def app(scope, receive, send):
+                assert serve.embed_step == {}, "an earlier request's step is still set"
+                serve.embed_step.update(images=images, seconds=seconds)
+
+            return app
+
+        async def never_embedded(scope, receive, send):
+            pass
+
+        with caplog.at_level(logging.INFO, logger="locus.analysis.mlx.serve"):
+            run_asgi(TelemetryMiddleware(request(27, 53.26)), http_scope(), [])
+            run_asgi(TelemetryMiddleware(request(1, 2.0)), http_scope(), [])
+            run_asgi(TelemetryMiddleware(never_embedded), http_scope(), [])
+        lines = [r.getMessage() for r in caplog.records if "done in" in r.message]
+        assert ", embed step 53.3s, 27 images in the request: wired max" in lines[0]
+        assert ", embed step 2.0s, 1 image in the request: wired max" in lines[1]
+        assert "embed step" not in lines[2]
+
     def test_ends_even_when_inner_app_raises(self):
         async def inner(scope, receive, send):
             raise RuntimeError("boom")
@@ -966,14 +992,12 @@ class TestPreprocessSerializer:
         assert in_flight["max"] == 1
 
 
-class TestPixelRelease:
-    def test_pixel_arrays_leave_the_inputs_once_encoded(self, monkeypatch):
+class TestEmbedStep:
+    def _install(self, monkeypatch, seen):
         import mlx.core as mx
         from locus.analysis.mlx import patching
-        from locus.analysis.mlx.serve import install_pixel_release
-        from mlx_vlm.server import generation
-
-        seen = {}
+        from locus.analysis.mlx.serve import install_embed_step
+        from mlx_vlm.server import generation, openai
 
         def encode(self, raw_inputs, images=None, apc_semantic_hash=None):
             seen["pixels_at_encode"] = "pixel_values" in raw_inputs
@@ -983,20 +1007,74 @@ class TestPixelRelease:
         # itself is the drift test's subject.
         monkeypatch.setattr(patching, "expect_source", lambda *a, **k: None)
         monkeypatch.setattr(generation.ResponseGenerator, "_gpu_embed", encode)
-        install_pixel_release()
+        monkeypatch.setattr(openai, "_chat_usage_chunk", openai._chat_usage_chunk)
+        install_embed_step()
+        return generation.ResponseGenerator
 
+    def test_pixel_arrays_leave_the_inputs_once_encoded(self, monkeypatch):
+        import mlx.core as mx
+
+        seen = {}
+        generator = self._install(monkeypatch, seen)
         raw_inputs = {
             "input_ids": mx.array([[1, 2]]),
             "pixel_values": mx.zeros((8, 4)),
             "pixel_values_videos": mx.zeros((8, 4)),
             "image_grid_thw": mx.array([[1, 2, 2]]),
         }
-        dummy = object.__new__(generation.ResponseGenerator)
-        _, gen_kwargs = generation.ResponseGenerator._gpu_embed(dummy, raw_inputs, None)
+        dummy = object.__new__(generator)
+        _, gen_kwargs = generator._gpu_embed(dummy, raw_inputs, None)
 
         assert seen["pixels_at_encode"]
         assert set(raw_inputs) == {"input_ids", "image_grid_thw"}
         assert "inputs_embeds" in gen_kwargs
+
+    def test_the_step_is_timed_with_its_image_count(self, monkeypatch):
+        import mlx.core as mx
+        from locus.analysis.mlx import serve
+
+        monkeypatch.setattr(serve, "embed_step", {})
+        generator = self._install(monkeypatch, {})
+        dummy = object.__new__(generator)
+        generator._gpu_embed(dummy, {"input_ids": mx.array([[1, 2]])}, None)
+        assert serve.embed_step["images"] == 0
+
+        generator._gpu_embed(
+            dummy,
+            {"input_ids": mx.array([[1, 2]]), "pixel_values": mx.zeros((8, 4))},
+            ["a.png", "b.png"],
+        )
+        assert serve.embed_step["images"] == 2
+        assert serve.embed_step["seconds"] >= 0
+
+    def test_the_usage_chunk_carries_the_steps_time_in_its_timings(self, monkeypatch):
+        import json
+        from types import SimpleNamespace
+
+        from locus.analysis.mlx import serve
+        from mlx_vlm.server import openai
+
+        monkeypatch.setattr(serve, "embed_step", {})
+        self._install(monkeypatch, {})
+        metrics = SimpleNamespace(
+            rate=20.0,
+            generation_tps=20.0,
+            token_times=[],
+            cached_tokens=0,
+            prompt_tps=500.0,
+            peak_memory=1.5,
+        )
+
+        def timings():
+            chunk = openai._chat_usage_chunk("id", "model", metrics, 1000, 40)
+            return json.loads(chunk.model_dump_json())["timings"]
+
+        assert "embed_ms" not in timings(), "no request has embedded"
+        serve.embed_step.update(seconds=53.26, images=27)
+        sent = timings()
+        assert sent["embed_ms"] == pytest.approx(53260.0)
+        assert sent["prompt_ms"] == pytest.approx(2000.0)
+        assert sent["predicted_ms"] == pytest.approx(2000.0)
 
     def test_refuses_boot_on_upstream_source_drift(self, monkeypatch):
         from locus.analysis.mlx import serve
@@ -1005,7 +1083,7 @@ class TestPixelRelease:
         monkeypatch.setattr(serve, "EXPECTED_GPU_EMBED_SHA256", "0" * 64)
         before = generation.ResponseGenerator._gpu_embed
         with pytest.raises(SystemExit, match="upstream drift"):
-            serve.install_pixel_release()
+            serve.install_embed_step()
         assert generation.ResponseGenerator._gpu_embed is before
 
 
@@ -1415,7 +1493,7 @@ def test_every_supported_family_has_its_patches():
 COMMON_PATCHES = {
     "install_heif_decode",
     "install_preprocess_serializer",
-    "install_pixel_release",
+    "install_embed_step",
     "install_prompt_recording",
     "install_gpu_tracking",
     "install_presence_penalty",
@@ -1469,7 +1547,7 @@ def test_the_boot_installs_every_patch_before_it_serves(
     for module, name in [
         (serve, "install_heif_decode"),
         (serve, "install_preprocess_serializer"),
-        (serve, "install_pixel_release"),
+        (serve, "install_embed_step"),
         (serve, "install_prompt_recording"),
         (serve, "install_gpu_tracking"),
         (presence_penalty, "install_presence_penalty"),

@@ -1,7 +1,7 @@
 """Thin locus layer over the upstream mlx-vlm server.
 
 Upstream (mlx_vlm.server) owns generation: continuous batching, structured output, thinking budget, APC prefix caching, speculative decode, vision feature cache.
-This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the pixel arrays released at encode (install_pixel_release), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent, never compacted (chat_turns.py), and the served family's own patches (Qwen's vision-encode chunking and fused attention; Gemma 4's in gemma4.py). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
+This module boots it behind the operational guarantees a resident model demands — memory limits from the sysctl (main), one model and the routes its clients use and nothing else (ServedOnlyMiddleware), admission (AdmissionMiddleware: one request resident at a time, first come first served; the line waits and nothing is refused; the slot frees only once upstream's GPU loop has dropped the request, install_gpu_tracking), the liveness guard (serve_guarded), memory telemetry (TelemetryMiddleware), the rendered-prompt record (install_prompt_recording), a lock over upstream's caller-thread preprocessing (install_preprocess_serializer), the embed step timed and its pixel arrays released (install_embed_step), the presence penalty over the generated tokens (presence_penalty.py), every turn of a conversation reaching the chat template as it was sent, never compacted (chat_turns.py), and the served family's own patches (Qwen's vision-encode chunking and fused attention; Gemma 4's in gemma4.py). Every upstream-keyed patch verifies the source it stands in for at boot and refuses to serve on drift (patching.py).
 README.md says what each is for.
 
 Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
@@ -14,8 +14,8 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: vision_chunking.install_vision_encode_chunking encodes Qwen's in chunks of at most the processor's pixel limit (count.pixel_limit), an image a request's own min_pixels sizes past it alone, output-identical on the pinned upstream.
 - on GPUs without neural accelerators, mlx reads a multi-token chunk of a head-dim-256 model by materializing its whole score table, so prefill memory grows with the prompt (16 GiB per 2,048-token chunk at 256k keys).
   Patched here: fused_attention.install_fused_attention has Qwen's attention ask mlx for its fused kernel, which never holds the table.
-- the GPU loop keeps a request's pixel arrays referenced after encoding them, through the request's prefill and decode and until the next request arrives (over 1 GiB for 47k image tokens).
-  Patched here: install_pixel_release drops them from the request's inputs once they are encoded.
+- the GPU loop keeps a request's pixel arrays referenced after encoding them, through the request's prefill and decode and until the next request arrives (over 1 GiB for 47k image tokens), and its prefill time starts after the step that builds the prompt's embeddings and encodes its images, whose time it reports nowhere.
+  Patched here: install_embed_step times that step for the request's serve-log line and a streamed response's timings, and drops the pixel arrays from the request's inputs once they are encoded.
 - a caller that disconnects ends its HTTP response at once, while the GPU loop drops the request only at its next step, or never hears the cancel and runs it to its last token.
   Patched here: install_gpu_tracking counts the requests the loop holds, and admission frees its slot only once that count is zero.
 - the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request.
@@ -489,7 +489,7 @@ class AdmissionMiddleware:
 
 
 class TelemetryMiddleware:
-    """Pure ASGI (BaseHTTPMiddleware buffers and breaks SSE streaming): brackets each generating request with the full-signal memory sampler and logs the summary when the response — streamed or not — finishes sending. Then releases the allocator's buffer cache, memory the process would otherwise go on holding between requests. The clear runs after the end snapshot, so the telemetry still records what the request held.
+    """Pure ASGI (BaseHTTPMiddleware buffers and breaks SSE streaming): brackets each generating request with the full-signal memory sampler and logs the summary when the response — streamed or not — finishes sending, with the time its embed step took (install_embed_step). Then releases the allocator's buffer cache, memory the process would otherwise go on holding between requests. The clear runs after the end snapshot, so the telemetry still records what the request held.
 
     The bracket opens by resetting mlx's peak, so the peak every reader of this request sees — the serve-log line, the memory.jsonl rows, the `timings` upstream returns — is this request's own. It sits inside admission, which opens only once the GPU loop holds nothing, so no other request's work lands in it. mlx restarts the peak from zero and raises it at each allocation, so a reading before the request first allocates — its start row — is 0. The peak counts mlx's live arrays only — the weights, the KV cache, the vision feature cache, the request's working set — never the allocator's buffer cache or the machine's wired memory, which the snapshot reads beside it.
 
@@ -506,6 +506,7 @@ class TelemetryMiddleware:
         from .telemetry import MemoryTelemetry
 
         mx.reset_peak_memory()
+        embed_step.clear()
         telemetry = MemoryTelemetry(uuid.uuid4().hex[:12])
         started = time.time()
 
@@ -524,8 +525,15 @@ class TelemetryMiddleware:
             await self.asgi_app(scope, receive, sending)
         finally:
             summary = telemetry.end()
+            images = embed_step.get("images")
+            embed = (
+                f", embed step {embed_step['seconds']:.1f}s, {images} "
+                f"image{'' if images == 1 else 's'} in the request"
+                if embed_step
+                else ""
+            )
             logger.info(
-                f"request {telemetry.request_id} done in {time.time() - started:.1f}s: wired max {summary['max_system_wired_gib']} GiB, end {summary['end']}"
+                f"request {telemetry.request_id} done in {time.time() - started:.1f}s{embed}: wired max {summary['max_system_wired_gib']} GiB, end {summary['end']}"
             )
             mx.clear_cache()
 
@@ -614,32 +622,81 @@ EXPECTED_GPU_EMBED_SHA256 = (
 )
 
 
-def install_pixel_release() -> None:
-    """Release a request's pixel arrays the moment its images are encoded.
+EXPECTED_USAGE_CHUNK_SHA256 = (
+    "b99682e0574ad2d849db59fe7a042ec9ce7ea0c826e0a7f28cf47da537a77d29"
+)
 
-    Upstream's GPU loop binds each admitted request's preprocessed inputs — pixel_values among them, an mlx array of every image's patches — to loop locals before encoding them in _gpu_embed, and those locals outlive the loop body: the arrays stay referenced through the request's whole prefill and decode, and past it, until the next request rebinds the names. Nothing reads them after _gpu_embed (its output carries the encoded embeddings, and the vision cache keeps its own encoded copy), so dropping them from the inputs once it returns frees them at the encode. It is keyed to _gpu_embed's exact source, the step whose contract that rests on (patching.py owns the policy)."""
-    from mlx_vlm.server import generation
+# The embed step of the request the GPU loop holds: its seconds and image count, set as the
+# step returns and read into that request's serve-log line and its stream's timings. Admission
+# serves one request at a time and opens only once the loop holds nothing, so one slot is one
+# request's.
+embed_step: dict = {}
+
+
+def install_embed_step() -> None:
+    """Time a request's embed step, for its serve-log line and a streamed response's timings, and release its pixel arrays after it.
+
+    _gpu_embed is the GPU loop's step between admitting a request and prefilling it: it builds the prompt's embeddings, encoding the request's images on the way. Upstream's prefill time starts after it and nothing reports how long it took. The patch times the whole step; TelemetryMiddleware writes the seconds and the image count into the request's serve-log line, and the stream's closing usage chunk carries the time as `embed_ms` in its `timings`, beside upstream's `prompt_ms` and `predicted_ms`. The step's time includes the image encode wherever the encode is evaluated inside it: the chunking patches evaluate each chunk there when the images encode in more than one, and upstream evaluates the image features there to store them whenever the vision cache is on, as SERVER_ENV keeps it. The cache keys a request's images as one set, so the step encodes nothing only when the cache holds that whole set.
+
+    Upstream's GPU loop binds each admitted request's preprocessed inputs — pixel_values among them, an mlx array of every image's patches — to loop locals before encoding them in _gpu_embed, and those locals outlive the loop body: the arrays stay referenced through the request's whole prefill and decode, and past it, until the next request rebinds the names. Nothing reads them after _gpu_embed (its output carries the encoded embeddings, and the vision cache keeps its own encoded copy), so dropping them from the inputs once it returns frees them at the encode.
+
+    It is keyed to the exact source of _gpu_embed, the step whose contract the timing and the release rest on, and of _chat_usage_chunk, which builds the chunk that carries the timings (patching.py owns the policy)."""
+    from mlx_vlm.server import generation, openai, schemas
 
     from .patching import expect_source
 
     expect_source(
-        "pixel release",
+        "embed step",
         "ResponseGenerator._gpu_embed",
         generation.ResponseGenerator._gpu_embed,
         EXPECTED_GPU_EMBED_SHA256,
-        "The release rests on _gpu_embed reading the pixel arrays only to encode them and "
-        "returning nothing that references them — re-verify that against the installed "
+        "The timing rests on _gpu_embed being the whole step between admission and "
+        "prefill, and the release on it reading the pixel arrays only to encode them and "
+        "returning nothing that references them — re-verify both against the installed "
         "version, then re-pin.",
     )
-    original = generation.ResponseGenerator._gpu_embed
+    expect_source(
+        "embed step",
+        "server/openai.py _chat_usage_chunk",
+        openai._chat_usage_chunk,
+        EXPECTED_USAGE_CHUNK_SHA256,
+        "The embed step's time is added to the timings of the stream's closing usage "
+        "chunk, which _chat_usage_chunk builds — re-verify that it still builds that chunk "
+        "and what its timings hold against the installed version, then re-pin.",
+    )
+    embed = generation.ResponseGenerator._gpu_embed
 
-    def releasing(self, raw_inputs, *args, **kwargs):
-        encoded = original(self, raw_inputs, *args, **kwargs)
+    def embedding(self, raw_inputs, images=None, *args, **kwargs):
+        started = time.perf_counter()
+        embedded = embed(self, raw_inputs, images, *args, **kwargs)
+        embed_step.update(
+            seconds=time.perf_counter() - started, images=len(images or [])
+        )
         for key in [k for k in raw_inputs if k.startswith("pixel_values")]:
             del raw_inputs[key]
-        return encoded
+        return embedded
 
-    generation.ResponseGenerator._gpu_embed = releasing
+    generation.ResponseGenerator._gpu_embed = embedding
+
+    class Timings(schemas.GenerationTimings):
+        embed_ms: float
+
+    class UsageChunk(schemas.ChatStreamChunk):
+        timings: Timings | schemas.StreamingTimings | None = None
+
+    usage_chunk = openai._chat_usage_chunk
+
+    def with_embed_step(*args, **kwargs):
+        chunk = usage_chunk(*args, **kwargs)
+        if not embed_step:
+            return chunk
+        fields = {name: getattr(chunk, name) for name in type(chunk).model_fields}
+        fields["timings"] = Timings(
+            **chunk.timings.model_dump(), embed_ms=embed_step["seconds"] * 1000
+        )
+        return UsageChunk(**fields)
+
+    openai._chat_usage_chunk = with_embed_step
 
 
 EXPECTED_GPU_LIFECYCLE_SHA256 = {
@@ -825,7 +882,7 @@ def main() -> None:
 
     install_heif_decode()
     install_preprocess_serializer()
-    install_pixel_release()
+    install_embed_step()
 
     from mlx_vlm.server import app
 
