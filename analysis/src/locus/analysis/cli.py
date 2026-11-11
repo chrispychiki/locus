@@ -14,7 +14,7 @@ A run that ends clean with a small say repeats the whole of it inline, so the ho
 import argparse
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -98,7 +98,7 @@ def _subject(rows) -> str:
 
 def _analysis_dir(db: str, rows) -> Path:
     """An analysis's identity is occasion + subject: the UTC moment it ran (first, so the family sorts chronologically), then what it analyzed. Two analyses over the same subject are different artifacts by design; a same-second collision fails loud downstream (analysis dirs are never overwritten), never suffixes silently."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     return _derived_root(db) / "analyses" / f"{stamp}_{_subject(rows)}"
 
 
@@ -424,7 +424,7 @@ def _status(args) -> None:
             sites[row["snippet"]].append(host)
     # How far behind the store each site's loaded data stands: the newest upload instant
     # among the chunks the db holds for that snippet, so no network read.
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     sites_block = []
     for snippet, found in sites.items():
         through = conn.execute(

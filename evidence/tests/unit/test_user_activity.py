@@ -50,12 +50,16 @@ def test_the_base_is_rrwebs_own_rule_read_out_of_its_source():
         "evidence/distill) so rrweb's rule can be pinned"
     )
     source = RRWEB_DIST.read_text()
-    body = re.search(r"isUserInteraction\(event\) \{(.*?)\n  \}", source, re.DOTALL)
+    body = re.search(
+        r"^([ \t]*)isUserInteraction\(event\) \{(.*?)\n\1\}",
+        source,
+        re.DOTALL | re.MULTILINE,
+    )
     assert body, "rrweb no longer defines isUserInteraction(event) — re-derive the base"
     assert (
         "event.data.source > IncrementalSource.Mutation && "
         "event.data.source <= IncrementalSource.Input"
-    ) in body.group(1), f"rrweb's rule changed:\n{body.group(1)}"
+    ) in body.group(2), f"rrweb's rule changed:\n{body.group(2)}"
     assert RRWEB_USER_INTERACTION_SOURCES == {
         IncrementalSource.MouseMove,
         IncrementalSource.MouseInteraction,

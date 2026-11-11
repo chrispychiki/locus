@@ -8,14 +8,12 @@ An agent reading an output has no reliable sense of the current time, so a print
 Epoch milliseconds need no rendering — they are already absolute and unambiguous; this spelling is for wherever a human-readable instant appears.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utc_stamp(ms: int | None = None) -> str:
     """The instant as `YYYY-MM-DDTHH:MM:SSZ` — the one spelling every locus surface prints. No argument reads the clock now; an epoch-ms argument renders that instant."""
     moment = (
-        datetime.now(timezone.utc)
-        if ms is None
-        else datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        datetime.now(UTC) if ms is None else datetime.fromtimestamp(ms / 1000, tz=UTC)
     )
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")

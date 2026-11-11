@@ -2145,6 +2145,157 @@ def test_unusable_retry_folds_the_burned_attempt_into_the_ledger(
     ) == (106, 91, 95)
 
 
+def test_a_retry_that_raises_still_lands_the_burned_attempt(tmp_path, spend_isolation):
+    """The burned first attempt was billed before the retry was sent, so a retry
+    the API refuses outright still leaves that attempt on the ledger and in the
+    meta."""
+    from locus.analysis.spend import read_ledger
+
+    conversation = _interactions_conversation(
+        tmp_path,
+        [
+            _interaction(
+                usage={
+                    "total_input_tokens": 53,
+                    "total_thought_tokens": 192,
+                    "total_output_tokens": 4,
+                    "total_tokens": 249,
+                },
+                status="incomplete",
+                interaction_id="v1_burned",
+            ),
+        ],
+        thinking_level="high",
+    )
+    burned = conversation.client.interactions.create
+
+    def create(**request):
+        if request["generation_config"]["thinking_level"] == "high":
+            return burned(**request)
+        raise ConnectionError("the retry never landed")
+
+    conversation.client.interactions.create = create
+    conversation.add_user_text("q")
+    with pytest.raises(ConnectionError, match="never landed"):
+        conversation.get_response(label="answer")
+
+    (entry,) = read_ledger(spend_isolation)
+    assert (
+        entry["input_tokens"],
+        entry["output_tokens"],
+        entry["thoughts_tokens"],
+    ) == (53, 4, 192)
+    meta = json.loads((tmp_path / "payloads" / "1_answer_meta.json").read_text())
+    assert meta["usage"]["exhausted_thinking_retry"]["interaction_id"] == "v1_burned"
+
+
+def _hop(interaction_id, usage, text="", continuation_token=None):
+    """One request of a reply the SDK chains: it ends requires_continuation with a token while output remains, completed without one at the end."""
+    return _interaction(
+        text,
+        usage=usage,
+        status="requires_continuation" if continuation_token else "completed",
+        interaction_id=interaction_id,
+    ).model_copy(update={"continuation_token": continuation_token})
+
+
+def test_an_interrupted_chained_reply_lands_the_requests_that_completed(
+    tmp_path, spend_isolation
+):
+    """The SDK continues a reply cut at the per-request output limit with further
+    requests. When one of those fails, the ones before it were billed: the SDK's
+    own raise carries them merged, and their usage reaches the ledger and the
+    meta."""
+    from google.genai import _interactions_continuation as continuation
+    from google.genai import errors
+    from locus.analysis.spend import read_ledger
+
+    conversation = _interactions_conversation(tmp_path, [])
+    first = _hop(
+        "v1_hop1",
+        {"total_input_tokens": 1000, "total_output_tokens": 300, "total_tokens": 1300},
+        text="the first part",
+        continuation_token="resume-here",
+    )
+
+    def dropped(token, previous_interaction_id):
+        raise ConnectionError("dropped mid-chain")
+
+    conversation.client.interactions.create = lambda **request: (
+        continuation.continue_unary_interaction(first, dropped)
+    )
+    conversation.add_user_text("q")
+    with pytest.raises(errors.ContinuationInterruptedError):
+        conversation.get_response(label="answer")
+
+    (entry,) = read_ledger(spend_isolation)
+    assert (entry["input_tokens"], entry["output_tokens"]) == (1000, 300)
+    meta = json.loads((tmp_path / "payloads" / "1_answer_meta.json").read_text())
+    assert meta["usage"]["total_tokens"] == 1300
+
+
+def test_a_chained_reply_bills_every_request_and_sizes_by_the_last(
+    tmp_path, spend_isolation
+):
+    """A chained reply's usage is the sum over its requests — what was billed, each
+    request having re-read the conversation — so the ledger takes the sum, while
+    the conversation's size is the final request's own count, read back from the
+    interaction the next turn chains from."""
+    from google.genai import _interactions_continuation as continuation
+    from locus.analysis.model.cards import context_tokens
+    from locus.analysis.spend import read_ledger
+
+    conversation = _interactions_conversation(tmp_path, [])
+    first = _hop(
+        "v1_hop1",
+        {
+            "total_input_tokens": 1000,
+            "initial_input_tokens": 946,
+            "total_output_tokens": 300,
+            "total_tokens": 1300,
+        },
+        text="the first part, ",
+        continuation_token="resume-here",
+    )
+    last = _hop(
+        "v1_hop2",
+        {
+            "total_input_tokens": 1300,
+            "total_output_tokens": 200,
+            "total_tool_use_tokens": 7,
+            "total_tokens": 1507,
+        },
+        text="and the rest",
+    )
+    conversation.client.interactions.create = lambda **request: (
+        continuation.continue_unary_interaction(
+            first, lambda token, previous_interaction_id: last
+        )
+    )
+    read_back = []
+
+    def get(id):
+        read_back.append(id)
+        return last
+
+    conversation.client.interactions.get = get
+    conversation.add_user_text("q")
+    response = conversation.get_response(label="answer")
+
+    assert response.text == "the first part, and the rest"
+    assert read_back == ["v1_hop2"] == [conversation._interaction_id]
+    (entry,) = read_ledger(spend_isolation)
+    assert (entry["input_tokens"], entry["output_tokens"]) == (2307, 500), (
+        "every request's input is billed, tool-use prompt tokens with it"
+    )
+    assert response.usage_metadata["total_tokens"] == 2807
+    assert conversation.context_remaining() == context_tokens(GEMINI) - 1507, (
+        "the summed total counts the conversation once per request"
+    )
+    meta = json.loads((tmp_path / "payloads" / "1_answer_meta.json").read_text())
+    assert meta["usage"]["final_hop"]["usage"]["total_tokens"] == 1507
+
+
 def test_gemini_context_left_anchors_on_the_wire_usage(tmp_path, monkeypatch):
     from locus.analysis.model import gemini
     from locus.analysis.model.cards import context_tokens

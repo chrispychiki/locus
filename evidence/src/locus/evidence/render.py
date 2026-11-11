@@ -41,13 +41,32 @@ INJECT_BATCH_BYTES = 15_000_000
 # flag a failed font), and scrollbar chrome is a render-environment artifact, not page content. They belong
 # to that situation — a page fetched from its own live origin needs neither and must not be given them.
 FIDELITY_ARGS = ["--disable-web-security", "--hide-scrollbars"]
+# What Playwright's launch error says when Chromium exited because it could not sandbox itself.
+SANDBOX_FAILED = "Chromium sandboxing failed!"
 
 
 def launch_chromium(playwright):
-    """A PAINTING Chromium (see the fidelity note above — `--headless=new` is the real browser, which paints without a display; Playwright's own `headless=True` is the non-painting one, so it stays False and the flag carries the mode)."""
-    return playwright.chromium.launch(
-        headless=False, args=["--headless=new", *FIDELITY_ARGS]
-    )
+    """A PAINTING Chromium (see the fidelity note above — `--headless=new` is the real browser, which paints without a display; Playwright's own `headless=True` is the non-painting one, so it stays False and the flag carries the mode), with its sandbox on: Playwright launches Chromium with `--no-sandbox` unless asked otherwise, and a replay loads the recorded page's images and fonts from the live web out of a recording the store accepts from anyone. A machine where Chromium cannot sandbox itself is refused with what the sandbox needs."""
+    from playwright.sync_api import Error
+
+    try:
+        return playwright.chromium.launch(
+            headless=False,
+            chromium_sandbox=True,
+            args=["--headless=new", *FIDELITY_ARGS],
+        )
+    except Error as error:
+        if SANDBOX_FAILED not in str(error):
+            raise
+        raise RuntimeError(
+            "Chromium could not start its sandbox on this machine, and a replay is not "
+            "rendered without one: it loads images and fonts from the live web, out of a "
+            "recording the store accepts from anyone. Chromium's sandbox needs two things "
+            "of the machine, and a container or a hardened Linux kernel commonly lacks "
+            "one: a user that is not root, and unprivileged user namespaces the kernel "
+            "(or the container's seccomp or AppArmor profile) lets that user create. "
+            "Give this machine both, then run the command again."
+        ) from error
 
 
 HARNESS = """<!DOCTYPE html>

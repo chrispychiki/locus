@@ -1,6 +1,6 @@
 """Retention — the declared horizon over the local copy of a recording."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -35,7 +35,7 @@ def test_the_shipped_declaration_is_the_one_both_runtimes_read():
     """The horizon Locus expires the db by is read from the same file the deploy converges the bucket by — one number, or the two copies drift."""
     root = Path(__file__).resolve().parents[3]
     assert horizon_days(root) >= 1
-    assert horizon_cutoff(root) < datetime.now(timezone.utc).date().isoformat()
+    assert horizon_cutoff(root) < datetime.now(UTC).date().isoformat()
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,7 @@ def test_a_horizon_that_cannot_delete_by_is_refused_by_name(
 
 
 def test_the_cutoff_keeps_the_horizon_and_drops_the_day_past_it():
-    now = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 27, 3, 0, tzinfo=UTC)
     assert cutoff_date(30, now) == "2026-07-28"
     assert cutoff_date(1, now) == "2026-08-26"
 

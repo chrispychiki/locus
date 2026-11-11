@@ -7,10 +7,10 @@ anyone who invoked this suite asked for the live check.
 
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 from locus.evidence.deployment import env_from_files
 
 EVIDENCE = Path(__file__).resolve().parents[1]

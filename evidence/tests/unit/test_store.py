@@ -1,5 +1,6 @@
 import hashlib
 import urllib.request
+from datetime import UTC, datetime
 
 import pytest
 from _support import FakeVerify
@@ -95,9 +96,7 @@ class _FakePaginator:
     def paginate(self, Bucket=None, Prefix="", Delimiter=None):
         contents, prefixes = [], []
         seen = set()
-        from datetime import datetime, timezone
-
-        stamp = datetime.fromtimestamp(0, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(0, tz=UTC)
         for key in sorted(self.blobs):
             if not key.startswith(Prefix):
                 continue
@@ -166,9 +165,8 @@ class _SlowPaginator:
 
     def paginate(self, Bucket=None, Prefix="", Delimiter=None):
         import time
-        from datetime import datetime, timezone
 
-        stamp = datetime.fromtimestamp(0, tz=timezone.utc)
+        stamp = datetime.fromtimestamp(0, tz=UTC)
         if Delimiter:
             yield {
                 "Contents": [],

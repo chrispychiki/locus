@@ -6,7 +6,7 @@ license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.26",
-    "playwright>=1.60.0",
+    "playwright>=1.64.1",
     "ua-parser>=1.0.2",
 ]
 

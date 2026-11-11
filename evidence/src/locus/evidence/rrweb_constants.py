@@ -1,4 +1,4 @@
-# Auto-generated from @rrweb/types@2.1.7 by distill/extract_rrweb_constants.js
+# Auto-generated from @rrweb/types@2.2.1 by distill/extract_rrweb_constants.js
 # DO NOT EDIT — regenerate with: bun distill/extract_rrweb_constants.js
 
 
@@ -11,6 +11,7 @@ class EventType:
     Custom = 5
     Plugin = 6
     Asset = 7
+    Annotation = 8
     PageLoad = 69
     PageVisible = 70
     PageHidden = 71
@@ -26,6 +27,7 @@ EVENTTYPE_NAMES = {
     5: "Custom",
     6: "Plugin",
     7: "Asset",
+    8: "Annotation",
     69: "PageLoad",
     70: "PageVisible",
     71: "PageHidden",

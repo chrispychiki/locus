@@ -4,7 +4,7 @@ The connection is analytics_engine.py's; this module owns the verb's judgment ai
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from locus.evidence.analytics_engine import TELEMETRY_SCHEMA, telemetry_schema
 from locus.evidence.clock import utc_stamp
@@ -34,7 +34,7 @@ def _utc_ms(value: str) -> int:
     except ValueError:
         raise SystemExit(f"{value!r} is not an ISO date/datetime or epoch milliseconds")
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp() * 1000)
 
 
@@ -132,8 +132,8 @@ def _ae_latest(dataset: str) -> str:
     latest = (probe.get("data") or [{}])[0].get("latest")
     if not latest:
         return "none — no rows anywhere in this dataset's retention"
-    then = datetime.strptime(latest, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    seconds = max(0, int((datetime.now(timezone.utc) - then).total_seconds()))
+    then = datetime.strptime(latest, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    seconds = max(0, int((datetime.now(UTC) - then).total_seconds()))
     ago = (
         f"{seconds}s"
         if seconds < 120

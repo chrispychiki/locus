@@ -13,10 +13,9 @@ Deletion is done with SQLite's secure_delete on, so the freed pages are zeroed r
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
 import tomllib
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from .chunk import parse_chunk_key, slice_date
 from .db import reclaim
@@ -47,8 +46,8 @@ def horizon_days(root: Path) -> int:
 
 def cutoff_date(days: int, now: datetime | None = None) -> str:
     """The horizon as a UTC date, `YYYY-MM-DD`: a recording whose open date falls before it is past the horizon, one whose date is it or later is kept."""
-    moment = now or datetime.now(timezone.utc)
-    return (moment.astimezone(timezone.utc).date() - timedelta(days=days)).isoformat()
+    moment = now or datetime.now(UTC)
+    return (moment.astimezone(UTC).date() - timedelta(days=days)).isoformat()
 
 
 def horizon_cutoff(root: Path, now: datetime | None = None) -> str:

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,7 @@ from locus.evidence.db import connect
 def test_logs_minted_in_one_instant_never_collide(tmp_path, monkeypatch):
     """The clock names a log, so the instant several agents share is where a name must not repeat."""
     monkeypatch.setattr("locus.analysis.cli.deployment_root", lambda: tmp_path)
-    instant = datetime(2026, 7, 25, 9, 8, 27, tzinfo=timezone.utc)
+    instant = datetime(2026, 7, 25, 9, 8, 27, tzinfo=UTC)
     monkeypatch.setattr(
         "locus.evidence.speak.datetime",
         type("OneInstant", (), {"now": staticmethod(lambda tz: instant)}),

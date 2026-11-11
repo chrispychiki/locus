@@ -9,7 +9,7 @@ import gzip
 import json
 import zlib
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import ua_parser
 
@@ -208,6 +208,6 @@ def decode_or_skip(
 
 
 def slice_date(slice_id: str) -> str:
-    return datetime.fromtimestamp(
-        slice_open_ms(slice_id) / 1000, tz=timezone.utc
-    ).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(slice_open_ms(slice_id) / 1000, tz=UTC).strftime(
+        "%Y-%m-%d"
+    )

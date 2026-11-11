@@ -1,7 +1,7 @@
 import json
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -82,7 +82,7 @@ def test_cli_status_select_and_open_materialization(tmp_path, capsys, monkeypatc
     subprocess.run(["bun", str(DISTILL), db], check=True, capture_output=True)
     conn = connect(db)
     snippet = conn.execute("SELECT snippet FROM slices LIMIT 1").fetchone()["snippet"]
-    an_hour_ago = int(datetime.now(timezone.utc).timestamp() * 1000) - 3_600_000
+    an_hour_ago = int(datetime.now(UTC).timestamp() * 1000) - 3_600_000
     conn.execute(
         "INSERT INTO loaded_chunks (key, etag, uploaded_ms) VALUES (?, 'e', ?)",
         (f"{snippet}/2026-01-01/{visitor_id}/x.gz", an_hour_ago),
@@ -1313,7 +1313,7 @@ def test_analyze_derives_the_analysis_dir_from_occasion_and_subject(
     tmp_path, capsys, monkeypatch
 ):
     import re
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     _db, _conn, rows = loaded_fixture_db(tmp_path, monkeypatch)
     rid = rows[0]["recorder_slice"]
@@ -1330,7 +1330,7 @@ def test_analyze_derives_the_analysis_dir_from_occasion_and_subject(
         }
 
     monkeypatch.setattr("locus.analysis.engine.run_analysis", fake_analysis)
-    before = datetime.now(timezone.utc).replace(microsecond=0)
+    before = datetime.now(UTC).replace(microsecond=0)
     main(["analyze", rid, "what happened?", "--run"])
 
     out = seen["out_dir"]
@@ -1354,9 +1354,7 @@ def test_analyze_derives_the_analysis_dir_from_occasion_and_subject(
         out.name,
     )
     assert match, f"occasion-first, subject after: {out.name}"
-    stamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%SZ").replace(
-        tzinfo=timezone.utc
-    )
+    stamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%SZ").replace(tzinfo=UTC)
     assert stamp >= before, "the occasion is minted UTC, at invocation"
 
     with pytest.raises(SystemExit):
@@ -1557,8 +1555,8 @@ def test_a_load_holds_the_db_to_the_declared_retention_horizon(
     monkeypatch.setattr("locus.analysis.cli.deployment_root", lambda: tmp_path)
     db = data_home(tmp_path) / "events.db"
     reach = (
-        datetime.now(timezone.utc).date()
-        - datetime.fromtimestamp((T0 - 60 * day) / 1000, timezone.utc).date()
+        datetime.now(UTC).date()
+        - datetime.fromtimestamp((T0 - 60 * day) / 1000, UTC).date()
     ).days + 1
 
     # First under a horizon that reaches both recordings, so both land.

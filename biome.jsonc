@@ -1,13 +1,15 @@
 // The whole repo lints on biome's recommended rules and formats on its defaults.
 // `bun run lint` and `bun run format` run it, with ruff, over the whole tree from anywhere in the repo.
 {
-	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.6.6/schema.json",
 	"vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
 	"files": {
 		// The vendored rrweb bundles, the generated constants files, and the test fixtures (a stand-in
-		// visitor site and the recording captured from it) are not authored here.
+		// visitor site and the recording captured from it) are not authored here. Markdown stays out:
+		// biome's Markdown formatter reads neither frontmatter nor GitHub tables, and rewrites both.
 		"includes": [
 			"**",
+			"!**/*.md",
 			"!evidence/vendor",
 			"!evidence/tests/fixtures",
 			"!evidence/distill/rrweb_constants.js",

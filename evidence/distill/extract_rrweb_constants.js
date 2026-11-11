@@ -83,7 +83,7 @@ const py =
 // object of `identifier: "string"` entries, so a literal-bounded regex is sufficient and stays derived.
 const svgTagMap = (() => {
 	const src = readFileSync(new URL(import.meta.resolve("rrweb")), "utf8");
-	const at = src.indexOf("const SVGTagMap = {");
+	const at = src.search(/\b(?:const|let|var) SVGTagMap = \{/);
 	if (at === -1)
 		throw new Error(
 			"SVGTagMap not found in the installed rrweb dist — extend this generator",

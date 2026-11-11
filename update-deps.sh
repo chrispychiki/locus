@@ -10,6 +10,8 @@ uv lock --upgrade
 EXTRAS=""
 if .venv/bin/python -c 'import mlx_vlm' >/dev/null 2>&1; then EXTRAS="--extra mlx"; fi
 uv sync $EXTRAS
+# Playwright drives the Chromium build its own release names, so a moved Playwright needs its browser.
+uv run python -m playwright install chromium
 
 for pkg in . evidence/distill recorder store; do
   (cd "$pkg" && bun update)

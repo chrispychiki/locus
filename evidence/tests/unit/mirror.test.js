@@ -662,7 +662,7 @@ test("an isShadow remove routes through the shadow root", () => {
 	expect(m.getNode(11)).toBeNull();
 });
 
-test("shadow subtrees keep their ids when their host is removed, as the replayer's map does", () => {
+test("shadow subtrees keep their ids when their host is removed, as rrdom's map does", () => {
 	const m = mirrorWith([
 		el(10, "my-widget", {}, [el(11, "span", {}, [], { isShadow: true })], {
 			isShadowHost: true,

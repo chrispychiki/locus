@@ -1,10 +1,11 @@
 """Analysis-side test scaffolding: the deployment's Gemini id, hand-built claims and verdicts, a scripted Conversation, and the offline count.
 The event builders, db builders, and the fixtures both suites share live in evidence/tests/_support.py, which conftest.py puts on the import path."""
 
+import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import tomllib
 from locus.analysis.ground.claims import Claim, ClaimType, TimestampComponents
 from locus.analysis.model.cards import GEMINI as GEMINI_CLIENT
 from locus.analysis.model.cards import models_speaking
@@ -211,13 +212,11 @@ class ScriptedConversation(Conversation):
 
 def horizon_at(root: Path) -> None:
     """A retention horizon declared under a test deployment root — every load and doctor holds the db to one. The suites' recordings are stamped at a fixed moment in the past, so the horizon declared here is the one that reaches them; a test of the horizon itself overwrites it."""
-    from datetime import datetime, timezone
-
     from _support import T0
     from locus.evidence.retention import CONFIG_FILE
 
-    recorded = datetime.fromtimestamp(T0 / 1000, timezone.utc).date()
-    reach = (datetime.now(timezone.utc).date() - recorded).days + 1
+    recorded = datetime.fromtimestamp(T0 / 1000, UTC).date()
+    reach = (datetime.now(UTC).date() - recorded).days + 1
     (root / "store").mkdir(exist_ok=True)
     (root / CONFIG_FILE).write_text(f"retention_days = {reach}\n")
 

@@ -153,11 +153,19 @@
 		// rrweb writes into the events it is given — a mutation it applies twice keeps only
 		// the removes still in its mirror, on the event object itself — so every player
 		// replays its own copy and the payload stays what the recording said.
+		// The player draws a recording's Annotation events as its own chrome — captions over the
+		// replay, markers on the timeline that open onto their text — and the store takes
+		// uploads from anyone, so the copy's annotations go in emptied: each keeps its place on
+		// the clock and draws nothing.
 		function build() {
 			const p = new Player({
 				target,
 				props: {
-					events: structuredClone(events),
+					events: structuredClone(events).map((event) =>
+						event.type === LocusRrweb.EventType.Annotation
+							? { ...event, data: {} }
+							: event,
+					),
 					width: Math.floor(recW * scale),
 					height: Math.floor(recH * scale),
 					autoPlay: false,

@@ -3,7 +3,7 @@ members = ["evidence", "analysis"]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.16.0",
+    "ruff>=0.17.4",
 ]
 
 [tool.uv]

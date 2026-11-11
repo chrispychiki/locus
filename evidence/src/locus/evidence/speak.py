@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .clock import utc_stamp
@@ -57,7 +57,7 @@ OUTPUT_HISTORY_BYTES = 128 * 1024 * 1024
 def open_log(outputs: Path, verb: str) -> Path:
     """This run's own log, at the UTC moment it opened and the verb that opened it — reserved before the work so the run can name it up front. Created empty and exclusively, so no two runs land on one path: a deployment is read concurrently, and each run must find its own log where it was told."""
     outputs.mkdir(parents=True, exist_ok=True)
-    moment = datetime.now(timezone.utc)
+    moment = datetime.now(UTC)
     while True:
         path = outputs / f"{moment.strftime('%Y-%m-%dT%H-%M-%S-%fZ')}_{verb}.log"
         try:

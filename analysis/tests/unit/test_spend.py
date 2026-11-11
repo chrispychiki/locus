@@ -5,7 +5,7 @@ The bar: the refusal fires at the boundary on every paid path, the ledger surviv
 
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from _analysis_support import (
@@ -43,7 +43,7 @@ REGISTRY_MATCH = {
 
 
 def _ms(*args):
-    return int(datetime(*args, tzinfo=timezone.utc).timestamp() * 1000)
+    return int(datetime(*args, tzinfo=UTC).timestamp() * 1000)
 
 
 # ── period semantics: UTC calendar-aligned, stated precisely ───────────────

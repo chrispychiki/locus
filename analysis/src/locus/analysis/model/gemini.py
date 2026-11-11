@@ -31,8 +31,12 @@ UPLOAD_CONCURRENCY = 16
 # itself to; a report counting more sets than this queues the rest a round trip behind.
 COUNT_CONCURRENCY = UPLOAD_CONCURRENCY
 # How every call to the API retries transient failures (429s, 5xx, timeouts): the SDK's own
-# exponential backoff, its waits narrated (_narrate_retries).
+# exponential backoff, its waits narrated (_narrate_retries). `attempts` counts the first try, so
+# a call is sent at most ten times.
 RETRY = {"initial_delay": 10, "jitter": 30, "attempts": 10}
+# The API version every call goes to, stated because the SDK's own default moves between its
+# releases.
+API_VERSION = "v1beta"
 
 
 def _literal_values(union) -> tuple[str, ...]:
@@ -141,7 +145,9 @@ def count_text_tokens(model: str, texts: list[str]) -> int:
 
     _narrate_retries()
     client = _client(
-        http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(**RETRY))
+        http_options=types.HttpOptions(
+            api_version=API_VERSION, retry_options=types.HttpRetryOptions(**RETRY)
+        )
     )
     content = types.Content(
         role="user", parts=[types.Part.from_text(text=t) for t in texts if t]
@@ -328,6 +334,7 @@ class GeminiConversation(Conversation):
         _narrate_retries()
         self.client = _client(
             http_options=types.HttpOptions(
+                api_version=API_VERSION,
                 timeout=timeout_ms,
                 retry_options=types.HttpRetryOptions(**RETRY),
             )
@@ -384,11 +391,12 @@ class GeminiConversation(Conversation):
         return {"model": self.model, "model_id": self.model_id, "prices": self.prices}
 
     def _spend_usage(self, usage_metadata: dict) -> dict:
-        """The interaction's usage fields into the ledger's vocabulary. total_cached_tokens is a subset of total_input_tokens, and an exhausted-thinking retry's burned first attempt was a billed call too, so its usage folds in whole."""
+        """The interaction's usage fields into the ledger's vocabulary. total_cached_tokens is a subset of total_input_tokens; total_tool_use_tokens is prompt the model read outside total_input_tokens (the API's total_tokens adds the two separately), so it counts as input; and an exhausted-thinking retry's burned first attempt was a billed call too, so its usage folds in whole. A reply the SDK chained over several requests reports each field summed over them, which is what was billed: every request re-reads the conversation."""
 
         def read(usage: dict) -> dict:
             return {
-                "input_tokens": usage.get("total_input_tokens") or 0,
+                "input_tokens": (usage.get("total_input_tokens") or 0)
+                + (usage.get("total_tool_use_tokens") or 0),
                 "cached_tokens": usage.get("total_cached_tokens") or 0,
                 "output_tokens": usage.get("total_output_tokens") or 0,
                 "thoughts_tokens": usage.get("total_thought_tokens") or 0,
@@ -402,7 +410,9 @@ class GeminiConversation(Conversation):
         return total
 
     def _usage_total(self, usage_metadata: dict) -> int | None:
-        return usage_metadata.get("total_tokens")
+        """The total of the interaction the next turn chains from. That is the reply itself, except where the SDK chained the reply over several requests: the usage it reports then sums them, counting the conversation once per request, so the count is the final request's own (final_hop)."""
+        final_hop = usage_metadata.get("final_hop")
+        return (final_hop["usage"] if final_hop else usage_metadata).get("total_tokens")
 
     def _delta_text_tokens(self, texts: list[str]) -> int:
         return count_text_tokens(self.model_id, texts)
@@ -561,14 +571,37 @@ class GeminiConversation(Conversation):
                 "usage": self._usage_dict(interaction),
             }
             self._reply_thinking_level = self._lowest_thinking_level()
-            interaction = self._generate(
-                self._reply_thinking_level, include_thoughts=False
-            )
+            try:
+                interaction = self._generate(
+                    self._reply_thinking_level, include_thoughts=False
+                )
+            # The burned attempt was billed whatever becomes of the retry, so a retry
+            # that raises carries it out.
+            except Exception as error:
+                error.usage_metadata = {
+                    **getattr(error, "usage_metadata", {}),
+                    "exhausted_thinking_retry": first_attempt,
+                }
+                raise
 
         self._require_usable(interaction, first_attempt)
         response = self._normalize(interaction)
         if first_attempt is not None:
             response.usage_metadata["exhausted_thinking_retry"] = first_attempt
+        # A reply the SDK chained over several requests reports their usage summed, which
+        # is not the conversation's size. The final request is its own stored
+        # interaction, the one the next turn chains from, so its usage is read back by
+        # id. The read is free, and the reply was billed whether or not it succeeds.
+        if len(interaction.continuation_ids or []) > 1:
+            try:
+                final_hop = self.client.interactions.get(id=interaction.id)
+            except Exception as error:
+                error.usage_metadata = response.usage_metadata
+                raise
+            response.usage_metadata["final_hop"] = {
+                "interaction_id": interaction.id,
+                "usage": self._usage_dict(final_hop),
+            }
         self._interaction_id = interaction.id
         self._reply_interaction_id = interaction.id
         self._pending = []
@@ -640,7 +673,18 @@ class GeminiConversation(Conversation):
             raise DryRun(
                 f"dry run: request to {self.model_id} assembled and persisted, not sent"
             )
-        return self.client.interactions.create(**request)
+        from google.genai import errors
+
+        # A request that ends at the API's per-request output limit with max_output_tokens left
+        # is continued by the SDK, request after request, and comes back as one interaction. A
+        # continuation that fails after an earlier request completed raises with those requests
+        # merged, and they were billed, so their usage rides the raise.
+        try:
+            return self.client.interactions.create(**request)
+        except errors.ContinuationInterruptedError as error:
+            if error.partial_interaction is not None:
+                error.usage_metadata = self._usage_dict(error.partial_interaction)
+            raise
 
     @staticmethod
     def _usage_dict(interaction) -> dict:

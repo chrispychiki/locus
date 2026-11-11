@@ -5,11 +5,11 @@
  */
 
 import deployment from "../deploy.config.toml";
+import { NOT_FOUND } from "../src/worker.js";
 import wrangler from "../wrangler.toml";
 import { account, cf, errMsg } from "./cf.js";
 import { RULE_ID, ruleDays } from "./lifecycle.js";
 import { publicExposures } from "./public-access.js";
-import { NOT_FOUND } from "../src/worker.js";
 
 const bucket = wrangler.r2_buckets[0].bucket_name;
 const worker = wrangler.name;

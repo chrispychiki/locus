@@ -679,9 +679,9 @@ export class LightweightMirror {
 		return false;
 	}
 
-	// The replayer's Mirror.removeNodeFromMap: drop the node's CURRENT id mapping and recurse over its
+	// rrdom's Mirror.removeNodeFromMap, the one the replayer's virtual-DOM mutations go through: drop the node's CURRENT id mapping and recurse over its
 	// light children — shadow roots and iframe content documents are not childNodes, so their subtrees stay
-	// addressable after their host is removed, exactly as the replayer leaves them.
+	// addressable after their host is removed, exactly as that map leaves them.
 	_removeNodeFromMap(node) {
 		if (node.id != null) this.nodes.delete(node.id);
 		for (const c of node.childNodes) this._removeNodeFromMap(c);

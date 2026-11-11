@@ -21,11 +21,10 @@ import math
 import os
 import sys
 import time
-import urllib.request
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
 import tomllib
+import urllib.request
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 SPEND_FILE = "spend.toml"
 LEDGER_FILE = "spend.jsonl"
@@ -100,7 +99,7 @@ def load_declaration(root: Path | None = None) -> dict:
 
 def period_bounds(period: str, now_ms: int) -> tuple[int, int]:
     """[start, end) of the UTC calendar period containing now_ms, in epoch ms. day: the UTC calendar day. week: the ISO week — Monday 00:00 UTC to the next Monday. month: the UTC calendar month — the 1st to the next 1st."""
-    now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    now = datetime.fromtimestamp(now_ms / 1000, tz=UTC)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == "day":
         start, end = midnight, midnight + timedelta(days=1)
@@ -327,7 +326,7 @@ def _fetch_registry() -> dict:
 def _registry_today() -> tuple[dict | None, str]:
     """(registry subset, provenance) — memoized per UTC day, failures included, so an offline machine pays one attempt a day, not one per priced call. The memo stores the attempt's full timestamp (the day is derived at read), and the provenance states that timestamp and the refresh convention, so a reader knows exactly what evidence backs the verdict and how stale it can be."""
     path = _memo_path()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     if path.exists():
         try:
             memo = json.loads(path.read_text())

@@ -34,10 +34,9 @@ Upstream's batched sampler implements temperature/top_p/top_k (min_p is accepted
 Extend SUPPORTED_SAMPLING only after verifying the engine honors the new field at the draw.
 """
 
+import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
-
-import tomllib
 
 CARDS_DIR = "cards"
 

@@ -8,11 +8,9 @@
 		"test": "bun run --cwd ../.. test"
 	},
 	"dependencies": {
-		"@rrweb/types": "2.1.7",
+		"@rrweb/types": "2.2.1",
 		"aria-query": "5.3.2",
-		"rrweb": "2.1.7"
-	},
-	"devDependencies": {
-		"postcss": "8.5.26"
+		"postcss": "8.5.32",
+		"rrweb": "2.2.1"
 	}
 }

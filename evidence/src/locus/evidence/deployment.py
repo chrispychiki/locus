@@ -11,11 +11,10 @@ Every fact the deployment declares resolves through here, from the artifact that
 
 import json
 import os
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-import tomllib
 
 from .cloudflare import CF_API
 
