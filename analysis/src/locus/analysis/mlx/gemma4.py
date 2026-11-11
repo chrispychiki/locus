@@ -5,6 +5,7 @@
 - **An image is encoded at the size it was sent.** Upstream resizes every image to fill one budget, the processor config's `max_soft_tokens` (280), so a screenshot drawn at a smaller or larger kind's size is scaled to 280 tokens. `install_processor_contract` raises the budget to the largest Gemma 4 was trained at (1120) and scales an image up only where a side is shorter than one cell of its grid, so an image on the processor's grid within that budget is encoded as sent and the token count is the geometry's (budget.image_geometry).
 - **A request's images encode in bounded chunks.** Upstream encodes all of a request's images as one graph, so the encode's transient grows with their total pixels. `install_vision_encode_chunking` encodes them in contiguous groups of at most the processor's pixel limit, each materialized before the next, with the same output.
 - **The checkpoint carries a stale chat template.** mlx-community's conversion ships an older template; Google's canonical template fixes tool-calling loops, turn closures, and thinking order, and the stale one has the model continue bare after a tool reply, where it echoes the prompt and emits stray tool-call markers. Every gemma4 processor the server loads renders with the canonical template at a pinned revision, refused on any other content, with two repairs, each to the format Google's own formatter (the `dialog` package the gemma library samples through) writes: a system message's content list renders as the string its parts concatenate to (the template follows every part with a space), and a replayed thought is closed directly after its last character (the template adds a newline, which the model then imitates at its next close).
+- **The canonical template moves a tool reply's images after its text.** It renders the reply's text in the reply block's quoted string and every image after the block's close, so screenshots sent each under a line naming its moment reach the model as all the lines, then all the screenshots: measured here on a reply of 24, the model gave 6 to 14 of them the wrong moment in seven of nine runs. The served template renders the parts in the order sent, each image's marker inside the quoted string where the image was sent, and in nine runs the model misplaced none. Google's formatter writes tool replies as text alone, so there is no reference layout to follow.
 - **Returned thinking begins with the channel's name.** The thinking budget and the thinking-aware grammar match single tokens, so the card's `thinking_markers` set the channel's own delimiters (`<|channel>` / `<channel|>`). Upstream's reasoning split tries that configured pair before its built-in `("<|channel>thought", "<channel|>")`, so every returned thought begins with `thought`, and replayed it renders the header twice. `install_reasoning_markers` drops a configured pair that a built-in pair refines, so the split removes the whole header; its whole-text cleanup, which also strips a leading `thought` after the built-in marker, is replaced by one that removes only the marker, since the canonical template opens the channel with its whole header and the text left is the thought itself.
 
 Each rewrite is keyed to the upstream source it replaces, and patching.py refuses the boot on drift.
@@ -84,6 +85,41 @@ PADDED_THOUGHT_CLOSE = (
 FAITHFUL_THOUGHT_CLOSE = (
     """        {{- '<|channel>thought\\n' + thinking_text + '<channel|>' -}}"""
 )
+
+# The branch that renders a tool message's content list: its text parts inside the reply block,
+# then a marker for each media part after the block's close.
+TOOL_TEXT_THEN_MEDIA = """\
+                            {%- for part in tool_body -%}
+                                {%- if part.get('type') == 'text' -%}
+                                    {%- set ns_txt.s = ns_txt.s + (part.get('text') | default('')) -%}
+                                {%- endif -%}
+                            {%- endfor -%}
+                            {{- format_tool_response_block(ns_tname.name, ns_txt.s) -}}
+                            {%- for part in tool_body -%}
+                                {%- if part.get('type') in ['image', 'image_url'] -%}
+                                    {{- '<|image|>' -}}
+                                {%- elif part.get('type') in ['audio', 'input_audio'] -%}
+                                    {{- '<|audio|>' -}}
+                                {%- elif part.get('type') == 'video' -%}
+                                    {{- '<|video|>' -}}
+                                {%- endif -%}
+                            {%- endfor -%}"""
+
+# Every part in the order sent, inside the reply block's quoted string: a media part's marker
+# where the part sits.
+TOOL_PARTS_IN_ORDER = """\
+                            {%- for part in tool_body -%}
+                                {%- if part.get('type') == 'text' -%}
+                                    {%- set ns_txt.s = ns_txt.s + (part.get('text') | default('')) -%}
+                                {%- elif part.get('type') in ['image', 'image_url'] -%}
+                                    {%- set ns_txt.s = ns_txt.s + '<|image|>' -%}
+                                {%- elif part.get('type') in ['audio', 'input_audio'] -%}
+                                    {%- set ns_txt.s = ns_txt.s + '<|audio|>' -%}
+                                {%- elif part.get('type') == 'video' -%}
+                                    {%- set ns_txt.s = ns_txt.s + '<|video|>' -%}
+                                {%- endif -%}
+                            {%- endfor -%}
+                            {{- format_tool_response_block(ns_tname.name, ns_txt.s) -}}"""
 
 PREFILL_OWES = (
     "Re-read the policy, the overlay, the mask builder, the batch constructor, and prompt_step "
@@ -483,7 +519,7 @@ def _replace_once(
 
 
 def canonical_template() -> str:
-    """Google's canonical Gemma 4 chat template at the pinned revision, fetched once into the Hugging Face cache, with the two repairs; content that does not hash to the pin refuses. A fetch that fails exits with its cause, in the server and in pricing alike: the server loads the processor inside upstream's model load, whose `except Exception` would otherwise answer the failure as a failed request."""
+    """Google's canonical Gemma 4 chat template at the pinned revision, fetched once into the Hugging Face cache, with the two repairs, and a tool reply's parts rendered in the order sent; content that does not hash to the pin refuses. A fetch that fails exits with its cause, in the server and in pricing alike: the server loads the processor inside upstream's model load, whose `except Exception` would otherwise answer the failure as a failed request."""
     import hashlib
     from pathlib import Path
 
@@ -513,7 +549,7 @@ def canonical_template() -> str:
             "canonical template",
             source,
             f"hashes to {actual[:12]}, not the pinned {EXPECTED_CANONICAL_TEMPLATE_SHA256[:12]}",
-            "Re-read the template at that revision, re-validate the repairs against it, then re-pin.",
+            "Re-read the template at that revision, re-validate the repairs and the tool reply's part order against it, then re-pin.",
         )
     owes = (
         "Read the canonical chat template, re-derive the repair against what Google's own "
@@ -522,13 +558,22 @@ def canonical_template() -> str:
     template = _replace_once(
         template, "system-part join", TRAILING_SYSTEM_PARTS, JOINED_SYSTEM_PARTS, owes
     )
-    return _replace_once(
+    template = _replace_once(
         template, "thought close", PADDED_THOUGHT_CLOSE, FAITHFUL_THOUGHT_CLOSE, owes
+    )
+    return _replace_once(
+        template,
+        "tool reply order",
+        TOOL_TEXT_THEN_MEDIA,
+        TOOL_PARTS_IN_ORDER,
+        "Read the canonical chat template's tool-message branch and have it render a content "
+        "list's parts in the order sent, inside the reply block's quoted string, then update the fragment "
+        "(analysis/src/locus/analysis/mlx/gemma4.py).",
     )
 
 
 def install_processor_contract() -> None:
-    """Have every gemma4 processor encode an image at encoded_size and render with the canonical chat template; on drift, refuse to boot (patching.py)."""
+    """Have every gemma4 processor encode an image at encoded_size and render with canonical_template's template; on drift, refuse to boot (patching.py)."""
     from mlx_vlm.models.gemma4 import processing_gemma4
 
     owes = (

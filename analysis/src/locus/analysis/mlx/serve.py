@@ -20,7 +20,7 @@ Known upstream gaps, version-keyed — re-validate on every mlx-vlm upgrade:
   Patched here: install_gpu_tracking counts the requests the loop holds, and admission frees its slot only once that count is zero.
 - the chat-completions handler compacts a conversation unless the request sends `context_management: []`: it re-renders and preprocesses the request to count it, clamps max_tokens to the context left, and past the context limit replaces the conversation's head with a model-written summary where it would otherwise refuse the request.
   Patched here: chat_turns.install_chat_turns has the handler never compact, and refuses a request that asks it to.
-- Gemma 4: an image prompt prefills unchunked, with prompt × prompt masks and the image overlay on every layer and past the sliding window; a request's images encode as one graph; every image is resized to fill the processor config's 280-token budget; the checkpoint's chat template is stale; and the reasoning split tries the single-token thinking markers the thinking budget needs ahead of its own pair for the whole channel header, so every returned thought begins with the header's `thought`.
+- Gemma 4: an image prompt prefills unchunked, with prompt × prompt masks and the image overlay on every layer and past the sliding window; a request's images encode as one graph; every image is resized to fill the processor config's 280-token budget; the checkpoint's chat template is stale, and Google's canonical one renders a tool reply's text and then all of its images; and the reasoning split tries the single-token thinking markers the thinking budget needs ahead of its own pair for the whole channel header, so every returned thought begins with the header's `thought`.
   Patched here: gemma4.py, whose docstring says what each patch does.
 - thinking_budget is rejected in combination with speculative decoding, so no draft model can be configured while the cards send a budget (they always do — it absorbs the thinking-runaway).
 
@@ -747,7 +747,7 @@ def install_gemma4(encode_chunk: int) -> None:
     install_vision_encode_chunking(encode_chunk)
     install_image_aligned_prefill()
     logger.info(
-        f"gemma4 installed: an image is encoded at the size it was sent, a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit, an image prompt prefills in chunks ending at image boundaries with the image overlay on the sliding layers within their window, the canonical chat template renders, and returned thinking has no channel header"
+        f"gemma4 installed: an image is encoded at the size it was sent, a request's images encode in chunks of at most {encode_chunk} pixels, the processor's pixel limit, an image prompt prefills in chunks ending at image boundaries with the image overlay on the sliding layers within their window, the canonical chat template renders with a system message's parts joined, a replayed thought closed at its last character and a tool reply's parts in the order sent, and returned thinking has no channel header"
     )
 
 

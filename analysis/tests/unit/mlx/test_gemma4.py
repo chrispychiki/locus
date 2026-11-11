@@ -522,12 +522,22 @@ TEMPLATE_MESSAGES = [
             }
         ],
     },
-    {"role": "tool", "tool_call_id": "c1", "content": "done"},
+    {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": [
+            {"type": "text", "text": "at [00:01.000]:\n"},
+            {"type": "image_url", "image_url": {"url": "one.png"}},
+            {"type": "text", "text": "\nat [00:02.000]:\n"},
+            {"type": "image_url", "image_url": {"url": "two.png"}},
+            {"type": "text", "text": "\nNow answer."},
+        ],
+    },
 ]
 
 
 class TestTemplateRepairs:
-    """Each repair, in the template the server renders, against the format Google's own formatter writes."""
+    """Each change to Google's template, in the template the server renders: the two repairs against the format Google's own formatter writes, and a tool reply's parts in the order sent."""
 
     @staticmethod
     def _render(template):
@@ -550,7 +560,17 @@ class TestTemplateRepairs:
         rendered = self._render(gemma4.canonical_template())
         assert "<|channel>thought\nI should look.<channel|>" in rendered
 
-    def test_googles_template_unrepaired_renders_both_differently(self):
+    def test_a_tool_replys_parts_render_in_the_order_sent_inside_the_replys_string(
+        self,
+    ):
+        rendered = self._render(gemma4.canonical_template())
+        assert (
+            '{value:<|"|>at [00:01.000]:\n<|image|>\nat [00:02.000]:\n<|image|>\nNow answer.<|"|>}<tool_response|><|channel>thought'
+            in rendered
+        )
+        assert rendered.count("<|image|>") == 2
+
+    def test_googles_template_unchanged_renders_each_differently(self):
         from pathlib import Path
 
         from huggingface_hub import hf_hub_download
@@ -565,3 +585,7 @@ class TestTemplateRepairs:
         rendered = self._render(raw)
         assert "You read screenshots. <turn|>" in rendered
         assert "I should look.\n<channel|>" in rendered
+        assert (
+            '\nNow answer.<|"|>}<tool_response|><|image|><|image|><|channel>thought'
+            in rendered
+        )

@@ -500,14 +500,15 @@ def test_every_turn_reaches_the_template_as_it_was_sent(tmp_path):
 @pytest.mark.family("gemma4")
 @pytest.mark.reads_rendering
 def test_every_turn_reaches_gemmas_template_as_it_was_sent(tmp_path):
-    """The handler's half of chat_turns.py under Google's canonical template, read off the rendering the server records: a tool reply's screenshot renders after the reply's text, where that template places a tool reply's images; the tool-call turn's thinking renders past the later user message under preserve_thinking, closed right after its last character (gemma4.py's repair); the answer's thinking, a turn before that message without a tool call, is dropped; and a template option the template never reads is refused."""
+    """The handler's half of chat_turns.py under the template gemma4.py serves, read off the rendering the server records: a tool reply's screenshot renders inside the reply block's quoted string where it was sent, and nowhere else; the tool-call turn's thinking renders past the later user message under preserve_thinking, closed right after its last character (gemma4.py's repair); the answer's thinking, a turn before that message without a tool call, is dropped; and a template option the template never reads is refused."""
     body = pull_conversation(tmp_path)
     requests.post(CHAT, json=body, timeout=TIMEOUT).raise_for_status()
     rendered = last_rendered_prompt()
     assert (
         '<|tool_response>response:request_screenshots{value:<|"|>screenshot at '
-        '00:01.000:What color is the screen?<|"|>}<tool_response|><|image|>'
+        '00:01.000:<|image|>What color is the screen?<|"|>}<tool_response|>'
     ) in rendered
+    assert rendered.count("<|image|>") == 1
     assert "<|channel>thought\nREASONING-BEFORE-THE-PULL<channel|>" in rendered
     assert "REASONING-OF-THE-ANSWER" not in rendered
     assert_an_unread_option_is_refused(body)
