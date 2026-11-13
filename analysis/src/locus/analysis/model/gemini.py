@@ -6,7 +6,7 @@ The conversation is stateful at the server (store=true, each turn chaining previ
 What the model sees does not change with the transport shape: every turn re-reads (and re-bills) the whole conversation, and the record persisted at the protocol layer is the full conversation as this client holds it.
 Anything a successful call carried is history by construction: the server's copy of the conversation holds it (previous_interaction_id), and the record keeps it for the same reason.
 
-Image cost is per-part media resolution, flat within a tier whatever the pixels (GEMINI_IMAGE_TOKENS, the Gemini 3 token table from https://ai.google.dev/gemini-api/docs/media-resolution). The card's media_resolution is a table, {kind: tier} — `activity_screenshots` for images added with the pushed flag, `pulled_screenshots` for everything else. A table with no `activity_screenshots` rides its `pulled_screenshots` tier for every image; a table with no `pulled_screenshots` rides the API's default tier for pulls. Appending parts never perturbs an earlier turn's bytes, so implicit prefix caching is unaffected by anything a later turn adds; cached-token counts arrive in the usage record and the discount is dollars, never context.
+Image cost is per-part media resolution, flat within a tier whatever the pixels (GEMINI_IMAGE_TOKENS, the Gemini 4 and Gemini 3 token table from https://ai.google.dev/gemini-api/docs/media-resolution). The card's media_resolution is a table, {kind: tier} — `activity_screenshots` for images added with the pushed flag, `pulled_screenshots` for everything else. A table with no `activity_screenshots` rides its `pulled_screenshots` tier for every image; a table with no `pulled_screenshots` rides the API's default tier for pulls. Appending parts never perturbs an earlier turn's bytes, so implicit prefix caching is unaffected by anything a later turn adds; cached-token counts arrive in the usage record and the discount is dollars, never context.
 """
 
 import hashlib
@@ -18,7 +18,7 @@ import typing
 from pathlib import Path
 from typing import Any
 
-from .cards import model_id, pricing, thinking_levels
+from .cards import max_output_tokens, model_id, pricing, thinking_levels
 from .protocol import Conversation, DryRun, Response, UnusableReply, json_schema_of
 
 GEMINI_FILE_TTL_S = 48 * 3600
@@ -55,12 +55,13 @@ def media_resolutions() -> tuple[str, ...]:
     return _literal_values(MediaResolution)
 
 
-# Per-image token cost by resolution tier — the Gemini 3 image column of the
-# media-resolution docs (https://ai.google.dev/gemini-api/docs/media-resolution,
-# read 2026-07-22); an unset tier resolves to the API default, which the same
-# table states equals high. The doc numbers err safe (high measured 1076-1105
-# across 64x64 through 1920x921, content- and transport-independent, perfectly
-# additive); billed usage is the exact record.
+# Per-image token cost by resolution tier — the image column the media-resolution
+# docs give Gemini 4 and Gemini 3 models alike
+# (https://ai.google.dev/gemini-api/docs/media-resolution, read 2026-11-13); an
+# unset tier resolves to the API default, which the same table states equals high.
+# The doc numbers err safe (on Gemini 3, high measured 1076-1105 across 64x64
+# through 1920x921, content- and transport-independent, perfectly additive);
+# billed usage is the exact record.
 GEMINI_IMAGE_TOKENS = {
     None: 1120,
     "low": 280,
@@ -293,7 +294,6 @@ class GeminiConversation(Conversation):
         record_dir: str | Path,
         thinking_level: str | None = None,
         media_resolution: dict | None = None,
-        max_output_tokens: int | None = None,
         cache_path: str | Path | None = None,
         timeout_ms: int = 600_000,
         dry_run: bool = False,
@@ -329,7 +329,7 @@ class GeminiConversation(Conversation):
         self.thinking_level = thinking_level
         self._reply_thinking_level = thinking_level
         self.media_resolution = media_resolution or {}
-        self.max_output_tokens = max_output_tokens
+        self.max_output_tokens = max_output_tokens(model)
         self.dry_run = dry_run
         _narrate_retries()
         self.client = _client(
@@ -382,10 +382,14 @@ class GeminiConversation(Conversation):
         return width, height
 
     def context_remaining(self, appending=()) -> int:
-        """Generation claims nothing from the input context on this path, so the whole remainder is the conversation's to spend beyond what it carries: the model's context minus the last response's usage total — the wire's own count of everything the conversation held through that reply, persisted in its meta.json — minus the priced delta of parts appended since it and of `appending` (tool-result text at countTokens' free arithmetic, served screenshots at the pulled_screenshots tier's flat price)."""
+        """What the conversation can still grow into: the model's context, minus the next reply's output ceiling (max_output_tokens, counted as spent so a turn that fills the rest still leaves its answer room), minus the last response's usage total (the wire's own count of everything the conversation held through that reply, persisted in its meta.json), minus the priced delta of parts appended since it and of `appending` (tool-result text at countTokens' free arithmetic, served screenshots at the pulled_screenshots tier's flat price)."""
         from .cards import context_tokens
 
-        return context_tokens(self.model) - self._wire_anchored_used(appending)
+        return (
+            context_tokens(self.model)
+            - self.max_output_tokens
+            - self._wire_anchored_used(appending)
+        )
 
     def _billing(self) -> dict:
         return {"model": self.model, "model_id": self.model_id, "prices": self.prices}
@@ -642,17 +646,16 @@ class GeminiConversation(Conversation):
         input_steps = [dict(step) for step in self._pending]
 
         generation_config: dict = {
-            "thinking_summaries": "auto" if include_thoughts else "none"
+            "thinking_summaries": "auto" if include_thoughts else "none",
+            "max_output_tokens": self.max_output_tokens,
         }
         if thinking_level is not None:
             generation_config["thinking_level"] = thinking_level
-        if self.max_output_tokens is not None:
-            generation_config["max_output_tokens"] = self.max_output_tokens
 
-        # Safety filtering: the Interactions API exposes no safety settings,
-        # and the default block threshold is Off for Gemini 3 models
-        # (https://ai.google.dev/gemini-api/docs/safety-settings, read
-        # 2026-07-23) — so the arbitrary web content recordings carry is not
+        # Safety filtering: no safety settings are sent, and a category left
+        # unset takes the default block threshold, Off for Gemini 2.5 and later
+        # models (https://ai.google.dev/gemini-api/docs/safety-settings, read
+        # 2026-11-13) — so the arbitrary web content recordings carry is not
         # silently filtered.
         request: dict = {
             "model": self.model_id,

@@ -223,8 +223,9 @@ class Conversation(ABC):
         # The config manifest is read after the call, not before it: what
         # meta.json records must be the configuration that actually produced
         # (or failed to produce) this reply, and a backend may adjust its own
-        # knobs mid-call (Gemini's exhausted-thinking retry re-runs at minimal
-        # thinking, and the record states that level, not the declared one).
+        # knobs mid-call (Gemini's exhausted-thinking retry re-runs at the card's
+        # lowest thinking level, and the record states that level, not the
+        # declared one).
         def config() -> dict:
             return {
                 "execution_mode": self.execution_mode,

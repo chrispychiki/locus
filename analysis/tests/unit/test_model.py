@@ -1999,8 +1999,8 @@ def _interactions_conversation(tmp_path, replies, wire_log=None, **kwargs):
 def test_exhausted_thinking_retry_is_on_the_record(tmp_path):
     """The retry is a second paid call: the record must carry both attempts'
     spend, and the recorded config must be the configuration that actually
-    produced the reply — minimal thinking, not the declared level it fell
-    back from. The burned interaction is never chained from. The burned
+    produced the reply — the card's lowest thinking level, not the declared
+    level it fell back from. The burned interaction is never chained from. The burned
     attempt's usage is the live-measured overrun shape: the status is the
     signal, and output tokens are nonzero — the model leaks a fragment before
     the cap lands."""
@@ -2242,7 +2242,7 @@ def test_a_chained_reply_bills_every_request_and_sizes_by_the_last(
     the conversation's size is the final request's own count, read back from the
     interaction the next turn chains from."""
     from google.genai import _interactions_continuation as continuation
-    from locus.analysis.model.cards import context_tokens
+    from locus.analysis.model.cards import context_tokens, max_output_tokens
     from locus.analysis.spend import read_ledger
 
     conversation = _interactions_conversation(tmp_path, [])
@@ -2289,16 +2289,17 @@ def test_a_chained_reply_bills_every_request_and_sizes_by_the_last(
         "every request's input is billed, tool-use prompt tokens with it"
     )
     assert response.usage_metadata["total_tokens"] == 2807
-    assert conversation.context_remaining() == context_tokens(GEMINI) - 1507, (
-        "the summed total counts the conversation once per request"
-    )
+    assert (
+        conversation.context_remaining()
+        == context_tokens(GEMINI) - max_output_tokens(GEMINI) - 1507
+    ), "the summed total counts the conversation once per request"
     meta = json.loads((tmp_path / "payloads" / "1_answer_meta.json").read_text())
     assert meta["usage"]["final_hop"]["usage"]["total_tokens"] == 1507
 
 
 def test_gemini_context_left_anchors_on_the_wire_usage(tmp_path, monkeypatch):
     from locus.analysis.model import gemini
-    from locus.analysis.model.cards import context_tokens
+    from locus.analysis.model.cards import context_tokens, max_output_tokens
     from locus.analysis.model.gemini import image_tier_tokens
 
     conversation = _interactions_conversation(
@@ -2320,9 +2321,10 @@ def test_gemini_context_left_anchors_on_the_wire_usage(tmp_path, monkeypatch):
         conversation.context_remaining()
 
     conversation.get_response()
-    base = context_tokens(GEMINI) - 5000
+    base = context_tokens(GEMINI) - max_output_tokens(GEMINI) - 5000
     assert conversation.context_remaining() == base, (
-        "the anchor is the wire's total_tokens, not a part walk"
+        "the anchor is the wire's total_tokens, not a part walk, and the next reply's "
+        "ceiling counts as spent"
     )
 
     monkeypatch.setattr(
@@ -2341,6 +2343,79 @@ def test_gemini_context_left_anchors_on_the_wire_usage(tmp_path, monkeypatch):
     ), (
         "a served screenshot is priced at the pulled_screenshots tier, flat whatever its pixels"
     )
+
+
+def test_gemini_sends_the_ceiling_its_room_reserves(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from _analysis_support import card_roster
+    from locus.analysis.model.gemini import GeminiConversation
+
+    card_roster(
+        monkeypatch,
+        tmp_path,
+        {
+            "card": (
+                'conversation = "gemini"\n'
+                'thinking_levels = ["low"]\n'
+                "context_tokens = 100000\n"
+                "headroom = 0.5\n"
+                "max_output_tokens = 2000\n"
+                "[pricing]\n"
+                "input_per_mtok = 1.0\ncached_input_per_mtok = 0.1\noutput_per_mtok = 2.0\n"
+            )
+        },
+    )
+    conversation = GeminiConversation(
+        "card", "sys", cache_path=tmp_path / "cache.db", record_dir=tmp_path / "record"
+    )
+    wire = []
+    reply = _interaction("seen", usage={"total_tokens": 5000})
+    conversation.client = SimpleNamespace(
+        interactions=SimpleNamespace(
+            create=lambda **request: wire.append(request) or reply
+        )
+    )
+    conversation.add_user_text("q")
+    conversation.get_response()
+    assert conversation.context_remaining() == 100000 - 2000 - 5000
+    assert wire[0]["generation_config"]["max_output_tokens"] == 2000, (
+        "the ceiling the room reserves is the one the request carries"
+    )
+
+
+def test_a_headroom_leaving_less_than_the_output_ceiling_is_refused_where_read(
+    tmp_path, monkeypatch
+):
+    from _analysis_support import card_roster
+    from locus.analysis.model.cards import headroom
+
+    gemini_card = (
+        'conversation = "gemini"\n'
+        "context_tokens = 100000\n"
+        "headroom = {headroom}\n"
+        "max_output_tokens = 2000\n"
+    )
+    local_card = (
+        'conversation = "openai-compatible"\n'
+        "context_tokens = 100000\n"
+        "headroom = {headroom}\n"
+        "max_tokens = 2000\n"
+    )
+    card_roster(
+        monkeypatch,
+        tmp_path,
+        {
+            "gemini-fits": gemini_card.format(headroom=0.98),
+            "gemini-overclaimed": gemini_card.format(headroom=0.99),
+            "local-fits": local_card.format(headroom=0.98),
+            "local-overclaimed": local_card.format(headroom=0.99),
+        },
+    )
+    for client in ("gemini", "local"):
+        assert headroom(f"{client}-fits") == 0.98
+        with pytest.raises(ValueError, match="headroom"):
+            headroom(f"{client}-overclaimed")
 
 
 def test_gemini_turns_chain_statefully_and_send_only_the_delta(tmp_path):
@@ -2482,7 +2557,6 @@ def test_gemini_request_carries_the_full_declared_config(tmp_path):
             _interaction('{"ok": true, "why": "fine"}', usage={"total_tokens": 6}),
         ],
         wire_log=wire,
-        max_output_tokens=32768,
     )
     conversation.add_user_text("q")
     tool = {
@@ -2553,7 +2627,6 @@ def test_gemini_requests_parse_as_the_sdk_request_model(tmp_path):
             "pulled_screenshots": "high",
         },
         thinking_level="medium",
-        max_output_tokens=32768,
     )
     conversation.add_user_text("evidence")
     conversation.add_user_image(str(screenshot), pushed=True)

@@ -987,7 +987,7 @@ def test_analyze_model_flag_selects_over_the_roster(tmp_path, capsys, monkeypatc
         .fetchone()["recorder_slice"]
     )
 
-    # Under the shipped declaration the default mark sits on the Gemini card, so a local price under --model proves the flag selected over the default.
+    # Under the shipped declaration the default mark sits on a Gemini card, so a local price under --model proves the flag selected over the default.
     from _analysis_support import remark_default
     from locus.analysis.model import cards
 

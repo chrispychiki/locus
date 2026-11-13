@@ -8,7 +8,6 @@ from .cards import (
     OPENAI_COMPATIBLE,
     conversation,
     load_card,
-    max_output_tokens,
     media_resolution,
     thinking_level,
 )
@@ -36,7 +35,6 @@ def make_conversation(
     if client == GEMINI:
         kwargs.setdefault("thinking_level", thinking_level(model_name))
         kwargs.setdefault("media_resolution", media_resolution(model_name))
-        kwargs.setdefault("max_output_tokens", max_output_tokens(model_name))
         return GeminiConversation(model_name, system_prompt, **kwargs)
     card = load_card(model_name)
     return OpenAICompatConversation(system_prompt, card=card, **kwargs)

@@ -1,7 +1,8 @@
 # Field semantics: analysis/src/locus/analysis/model/cards.py.
 conversation = "gemini"
 model = "gemini-3.5-flash-lite"
-# Input limit per the model page: https://ai.google.dev/gemini-api/docs/models
+# Input limit per the model page, which caps output (65536) apart from it, so the room the output
+# ceiling holds back is slack here: https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
 context_tokens = 1048576
 # Lower than the local cards': pulled screenshots ride the detail tier and the whole conversation
 # re-bills every turn.
